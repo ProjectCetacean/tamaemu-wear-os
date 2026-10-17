@@ -1,0 +1,98 @@
+plugins { id 'com.android.application' }
+
+// The synthetic transport diagnostic is opt-in and confined to QA debug.
+def wearTestPackage = providers.gradleProperty('wearTestPackage').orElse('false').get().toBoolean()
+def wearTileTransportProbe = providers.gradleProperty('wearTileTransportProbe').orElse('false').get().toBoolean()
+if (wearTileTransportProbe && !wearTestPackage) {
+    throw new GradleException('wearTileTransportProbe requires wearTestPackage=true')
+}
+
+// Queue tuning is a finite QA experiment, never a production setting.
+def wearQaAudioQueue = providers.gradleProperty('wearQaAudioQueueMs')
+if (wearQaAudioQueue.isPresent() &&
+        (!wearTestPackage || wearTileTransportProbe || !(wearQaAudioQueue.get() in ['30', '40', '60']))) {
+    throw new GradleException('wearQaAudioQueueMs requires 30, 40 or 60, wearTestPackage=true and no wearTileTransportProbe')
+}
+def wearQaAudioQueueMs = wearQaAudioQueue.orElse('60').get().toInteger()
+
+android {
+    namespace 'io.github.projectcetacean.tamaemu'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
+    ndkVersion '27.3.13750724'
+
+    defaultConfig {
+        applicationId (wearTestPackage ? 'io.github.projectcetacean.tamaemu.qoltest' : 'io.github.projectcetacean.tamaemu')
+        manifestPlaceholders = [wearAppLabel: wearTestPackage ? 'Tamaemu QoL test' : '@string/app_name',
+                                wearQaAudioQueueMs: wearQaAudioQueueMs]
+        minSdk 26
+        targetSdk 36
+        versionCode 9
+        versionName '0.2.0-wear.9'
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64' }
+        externalNativeBuild {
+            cmake { arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON' }
+        }
+    }
+    externalNativeBuild {
+        cmake { path file('../native/CMakeLists.txt'); version '3.31.5' }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    if (wearTileTransportProbe && wearTestPackage) {
+        sourceSets {
+            debug {
+                java.srcDir 'src/qoltest/java'
+                // Debug overlay merges with the unchanged main manifest.
+                manifest.srcFile 'src/qoltest/AndroidManifest.xml'
+            }
+        }
+    }
+    if (wearTestPackage && !wearTileTransportProbe) {
+        sourceSets {
+            debug {
+                java.srcDir 'src/audioqa/java'
+                manifest.srcFile 'src/audioqa/AndroidManifest.xml'
+            }
+            testDebug { java.srcDir 'src/audioqaTest/java' }
+        }
+    }
+    packaging { jniLibs { useLegacyPackaging false } }
+    lint { abortOnError true }
+    testOptions {
+        unitTests.includeAndroidResources = true
+        unitTests.all { include '**/*AndroidTest.class' }
+    }
+}
+
+dependencies {
+    implementation 'androidx.wear.tiles:tiles:1.6.2'
+    implementation 'androidx.wear.protolayout:protolayout:1.4.2'
+    implementation 'androidx.concurrent:concurrent-futures:1.3.0'
+    // Generated protocol classes are runtime dependencies of the production builders.
+    // Tests inspect the real request/layout protos, so they need these on javac's classpath.
+    testImplementation 'androidx.wear.tiles:tiles-proto:1.6.2'
+    testImplementation 'androidx.wear.protolayout:protolayout-proto:1.4.2'
+    testImplementation 'androidx.wear.protolayout:protolayout-external-protobuf:1.4.2'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
+}
+
+// AGP's host-test manifest can omit main Application attributes. Feed the actual
+// production artifact to the Back fixture instead of guessing an intermediate path.
+androidComponents {
+    onVariants(selector().withBuildType('debug')) { variant ->
+        def productionManifest = variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.MERGED_MANIFEST.INSTANCE)
+        variant.unitTest.configureTestTask { testTask ->
+            testTask.inputs.file(productionManifest).withPropertyName('productionMergedManifest')
+            testTask.doFirst {
+                testTask.systemProperty 'tamaemu.productionMergedManifest', productionManifest.get().asFile.absolutePath
+            }
+        }
+    }
+}

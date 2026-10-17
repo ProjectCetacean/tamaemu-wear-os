@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tamaemu</string>
+    <string name="original_display">Original pet display</string>
+    <string name="button_label">Button %1$s</string>
+    <string name="retry">Retry</string>
+    <string name="loading">Opening your pet…</string>
+    <string name="missing_firmware">Firmware needed. Use the private local firmware installer, then tap Retry. No firmware is included.</string>
+    <string name="open_failed">Could not open this pet. Firmware or save may be incompatible or damaged. Existing data was kept. Back up the app data and check the local setup guide before retrying.</string>
+    <string name="save_failed">Save failed. Your current pet is still held in memory. Free watch storage, then tap Retry. Do not force stop or uninstall the app.</string>
+    <string name="native_failed">Emulation stopped. Your pet is still held in memory. Tap Retry to resume. If this repeats, pause and check the local setup guide.</string>
+    <string name="stop_unconfirmed">Latest save not confirmed. Reopen Tamaemu to retry before force stopping.</string>
+    <string name="recovery_required">The previous session ended before its final save was confirmed. Tap Retry to restore your latest checkpoint. Some recent progress may be missing.</string>
+    <string name="recovery_missing_save">The previous session ended without a confirmed final save, and no checkpoint was found. Existing files were kept. Back up the app data and check the local setup guide.</string>
+</resources>

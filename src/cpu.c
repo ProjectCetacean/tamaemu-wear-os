@@ -1,3 +1,4 @@
+/* Wear OS replay changes: October 2026. */
 /* S1C33 PE interpreter implemented with reference to GMMan's SLEIGH definition:
  * https://github.com/GMMan/s1c33_sleigh
  */
@@ -699,4 +700,26 @@ void cpu_step(Emu *e)
         e->pending_irq = 0;
     }
     step_one(e, 0);
+}
+
+/* Wear replay, 2026-10-16: combine only idle returns before the next tick.
+ * Leave waking steps to cpu_step, including their instruction/IRQ side effects.
+ * No peripheral event or floating-point guest-time update is skipped. */
+unsigned cpu_skip_idle(Emu *e, unsigned max_steps)
+{
+    if (!max_steps || e->stopped || !e->halted || e->pending_irq || e->wake_req)
+        return 0;
+    uint64_t elapsed = e->cycles - e->last_tick;
+    unsigned steps = elapsed >= 256 ? 1 : (unsigned)((256 - elapsed + 15) / 16);
+    if (steps > max_steps) steps = max_steps;
+    /* Keep uint64 overflow on the original single-step path. */
+    uint64_t before_wrap = (UINT64_MAX - e->cycles) / 16;
+    if (steps > before_wrap) steps = (unsigned)before_wrap;
+    if (!e->halt_hard) {
+        if (e->cycles >= e->wake_at) return 0;
+        uint64_t before_wake = (e->wake_at - e->cycles - 1) / 16;
+        if (steps > before_wake) steps = (unsigned)before_wake;
+    }
+    e->cycles += (uint64_t)steps * 16;
+    return steps;
 }

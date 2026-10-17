@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- QA startup must not instantiate the pet Application. No launcher is added. -->
+    <application android:name="android.app.Application" tools:replace="android:name">
+        <service android:name=".PetTileService" tools:node="remove" />
+        <activity android:name=".TileTransportProbeActivity"
+            android:label="Tile transport probe" android:exported="true"
+            android:launchMode="singleTop" />
+        <service android:name=".TileTransportProbeService" android:exported="true"
+            android:label="Tile transport probe"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <meta-data android:name="androidx.wear.tiles.PREVIEW" android:resource="@drawable/pet_tile_preview" />
+        </service>
+        <receiver android:name=".TileTransportProbeReceiver" android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <service android:name=".TileTransportProbeJob" android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+    </application>
+</manifest>

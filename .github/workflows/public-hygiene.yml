@@ -1,0 +1,38 @@
+name: Public hygiene
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  public-hygiene:
+    name: Public hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Test all Python checks
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Scan tracked publication files
+        run: python3 scripts/check-public-hygiene.py
+      - name: Check public documentation
+        run: python3 scripts/check-public-docs.py
+      - name: Check complete public ancestry
+        env:
+          REPOSITORY_PRIVATE: ${{ toJSON(github.event.repository.private) }}
+        shell: bash --noprofile --norc -eo pipefail {0}
+        run: |
+          case "$REPOSITORY_PRIVATE" in
+            false)
+              tip="$GITHUB_SHA"
+              case "$GITHUB_REF" in refs/tags/*) tip="$GITHUB_REF" ;; esac
+              python3 scripts/check-public-history.py --root . --tip "$tip"
+              ;;
+            true) echo 'Private preview: current files checked; ancestry is NOT cleared for publication.' ;;
+            *) echo 'Repository visibility is unverified; refusing public-history clearance.' >&2; exit 1 ;;
+          esac

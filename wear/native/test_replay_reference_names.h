@@ -1,0 +1,15 @@
+/* Test-only frozen backend symbol namespace. */
+#define wear_open replay_reference_open
+#define wear_close replay_reference_close
+#define wear_audio_set_enabled replay_reference_audio_set_enabled
+#define wear_audio_drain replay_reference_audio_drain
+#define wear_advance_headless replay_reference_advance_headless
+#define wear_advance replay_reference_advance
+#define wear_button replay_reference_button
+#define wear_save replay_reference_save
+#define wear_state replay_reference_state
+#define wear_state_digest replay_reference_state_digest
+#define wear_read_life replay_reference_read_life
+#define wear_write_life replay_reference_write_life
+#define wear_committed_payload_hash replay_reference_committed_payload_hash
+#define periph_tick replay_reference_periph_tick

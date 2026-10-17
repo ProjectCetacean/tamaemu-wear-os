@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="192dp" android:height="192dp" android:viewportWidth="192" android:viewportHeight="192">
+    <!-- Authored generic picker illustration. No firmware or real checkpoint pixels. -->
+    <path android:fillColor="#161B22" android:pathData="M96,0A96,96 0,1 1,95.99,0Z" />
+    <path android:fillColor="#242B35" android:strokeColor="#414C59" android:strokeWidth="1"
+        android:pathData="M36.5,37.5H155.5Q157.5,37.5 157.5,39.5V158.5Q157.5,160.5 155.5,160.5H36.5Q34.5,160.5 34.5,158.5V39.5Q34.5,37.5 36.5,37.5Z" />
+    <path android:fillColor="#B8DAC7" android:pathData="M36.5,39.5H155.5V158.5H36.5Z" />
+    <path android:fillColor="#161B22" android:pathData="M72,70H86V84H72ZM106,70H120V84H106ZM82,110H110V120H82Z" />
+    <path android:fillColor="#A6B1BC" android:pathData="M66,167.5H126V171.5H66Z" />
+</vector>

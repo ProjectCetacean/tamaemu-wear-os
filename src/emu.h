@@ -1,3 +1,4 @@
+/* Wear OS replay changes: October 2026. */
 #ifndef EMU_H
 #define EMU_H
 
@@ -446,6 +447,8 @@ void mem_write32(Emu *e, uint32_t a, uint32_t v);
 /* cpu.c */
 void cpu_reset(Emu *e);
 void cpu_step(Emu *e);         /* one instruction (ext prefixes folded in) */
+/* Replay only: returns equivalent idle steps, bounded by next 256-cycle tick. */
+unsigned cpu_skip_idle(Emu *e, unsigned max_steps);
 
 /* disasm.c */
 int disasm_one(Emu *e, uint32_t pc, char *out, size_t outsz); /* returns length in bytes consumed */

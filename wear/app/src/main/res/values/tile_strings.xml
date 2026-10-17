@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pet_tile_label">Tamaemu</string>
+    <string name="tile_saved_time">Saved %1$s</string>
+    <string name="tile_neutral">Open Tamaemu to show your pet</string>
+    <string name="tile_open_description">Open Tamaemu. Saved display from %1$s%2$s</string>
+</resources>

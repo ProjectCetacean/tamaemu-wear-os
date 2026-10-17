@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <!-- Authored LCD toy illustration, independent of firmware and checkpoint pixels. -->
+    <path android:fillColor="#161B22" android:pathData="M24,0a24,24 0,1 0,0 48a24,24 0,1 0,0 -48" />
+    <path android:fillColor="#242B35" android:strokeColor="#414C59" android:strokeWidth="0.8"
+        android:pathData="M24,3C35,3 42,14 42,26C42,38 34,45 24,45C14,45 6,38 6,26C6,14 13,3 24,3Z" />
+    <path android:fillColor="#161B22" android:strokeColor="#414C59" android:strokeWidth="0.8"
+        android:pathData="M13,10H35Q37,10 37,12V34Q37,36 35,36H13Q11,36 11,34V12Q11,10 13,10Z" />
+    <path android:fillColor="#B8DAC7" android:pathData="M13,12H35V34H13Z" />
+    <path android:fillColor="#161B22" android:pathData="M18,18H21V21H18ZM27,18H30V21H27ZM20,26H28V28H20Z" />
+    <path android:fillColor="#A6B1BC" android:strokeColor="#EFF4F8" android:strokeWidth="0.5"
+        android:pathData="M18.2,40a2.2,2.2 0,1 0,-4.4 0a2.2,2.2 0,1 0,4.4 0M26.2,40a2.2,2.2 0,1 0,-4.4 0a2.2,2.2 0,1 0,4.4 0M34.2,40a2.2,2.2 0,1 0,-4.4 0a2.2,2.2 0,1 0,4.4 0" />
+</vector>

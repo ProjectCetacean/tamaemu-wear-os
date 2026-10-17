@@ -1,3 +1,4 @@
+/* Wear OS replay changes: October 2026. */
 #include "emu.h"
 #include <stdlib.h>
 
@@ -572,17 +573,37 @@ static void t16_run(Emu *e, int x, uint32_t clocks)
     uint16_t cra = (uint16_t)(IOB(base) | (IOB(base + 1) << 8));
     uint16_t crb = (uint16_t)(IOB(base + 2) | (IOB(base + 3) << 8));
     T16 *t = &e->t16[x];
-    while (clocks--) {
-        t->counter++;
-        /* Presets may pass a compare value, so >= means due. Latch each edge once. */
+    /* Wear replay, 2026-10-16: aggregate edges inside this unchanged peripheral
+     * tick. No CPU/IRQ observer runs between these timer clocks. The first
+     * compare must include presets already past CRB and uint16 wrap *before*
+     * comparison; subsequent zero-origin periods are exactly max(CRB, 1). */
+    if (clocks) {
+        uint32_t counter = t->counter;
+        uint32_t first = counter == UINT16_MAX ? (uint32_t)crb + 1
+                         : counter + 1 >= crb ? 1 : crb - counter;
+        uint32_t prefix = clocks < first ? clocks : first;
+        t->counter = (uint16_t)(counter + prefix);
         if (cra && !t->a_fired && t->counter >= cra) {
             t16_set_flag(e, x, 1);
             t->a_fired = 1;
         }
-        if (t->counter >= crb) {
+        if (clocks >= first) {
             t16_set_flag(e, x, 0);
             t->counter = 0;
             t->a_fired = 0;
+            clocks -= first;
+            uint32_t period = crb ? crb : 1;
+            uint32_t repeats = clocks / period;
+            if (repeats) {
+                if (cra && cra <= period) t16_set_flag(e, x, 1);
+                t16_set_flag(e, x, 0);
+                e->t16_fires[x] += repeats - 1;
+            }
+            t->counter = (uint16_t)(clocks % period);
+            if (cra && t->counter >= cra) {
+                t16_set_flag(e, x, 1);
+                t->a_fired = 1;
+            }
         }
     }
     IOB(base + 4) = (uint8_t)t->counter;

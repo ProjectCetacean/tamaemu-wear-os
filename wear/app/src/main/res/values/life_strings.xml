@@ -1,0 +1,24 @@
+<resources>
+    <string name="life_normal">Normal</string>
+    <string name="life_protected">Protected</string>
+    <string name="life_normal_description">Your pet ages while you are away. Background jobs make progress when Android allows; opening the app finishes any remaining time.</string>
+    <string name="life_protected_description">Paused while away. Time already owed must finish first. Care consequences still apply while the app is open.</string>
+    <string name="life_clock_estimated">Clock changed or elapsed time was estimated. Across a restart, clock edits can affect aging.</string>
+    <string name="life_catching_up">Catching up: %1$s of pet time</string>
+    <string name="life_mode_unavailable">Mode changes are available when your pet is caught up and saving has finished.</string>
+    <string name="life_save_failed">Saving failed. Your current pet is held in memory. Retry saving before continuing.</string>
+    <string name="life_recovery_description">The last foreground visit did not finish saving. Recovery returns to the last checkpoint and can lose recent button actions. Protected mode freezes the uncertain time since that checkpoint.</string>
+    <string name="life_scheduling_failed">Background scheduling is unavailable. Opening your pet still catches up.</string>
+    <string name="life_accounting_error">Time accounting failed. Aging is stopped to protect your saved pet. Back up the app data and check the local setup guide.</string>
+    <string name="life_updated">Updated %1$s</string>
+    <string name="life_heading">Life between visits</string>
+    <string name="life_saving">Saving your pet… Care is paused until saving finishes.</string>
+    <string name="life_ready">Caught up. Care is ready.</string>
+    <string name="life_mode_saving">Applying life mode… The selected mode changes only after saving succeeds.</string>
+    <string name="life_mode_rejected">Life mode change was not confirmed. The last saved mode is still selected.</string>
+    <string name="life_clock_policy">After a reboot or when the boot clock is unavailable, elapsed time uses UTC. A forward clock edit can add aging; a backward edit adds no time and keeps time already owed.</string>
+    <string name="life_selected">%1$s, selected</string>
+    <string name="life_scheduler_pending">Background scheduling status is not yet available.</string>
+    <string name="life_scheduler_status">Background: %1$s</string>
+    <string name="life_not_saved">No successful life checkpoint confirmed yet.</string>
+</resources>

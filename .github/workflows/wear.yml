@@ -1,0 +1,244 @@
+name: Wear OS build
+on:
+  push:
+    paths:
+      - 'wear/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - '.github/workflows/wear.yml'
+  pull_request:
+    paths:
+      - 'wear/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - '.github/workflows/wear.yml'
+  workflow_dispatch:
+concurrency:
+  group: wear-${{ github.head_ref || github.ref_name }}-${{ github.event_name }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  publication-gate:
+    name: Publication gate
+    uses: ./.github/workflows/public-hygiene.yml
+    permissions:
+      contents: read
+  build:
+    needs: publication-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash --noprofile --norc -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify wrapper integrity
+        run: echo "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f  wear/gradle/wrapper/gradle-wrapper.jar" | sha256sum -c -
+      # Manual dispatch skips repeated host tests.
+      # Pull-request and push builds retain every host gate.
+      - name: Local device-helper regressions (no device or firmware)
+        if: github.event_name != 'workflow_dispatch'
+        run: python3 -m unittest discover -s scripts/tests -v 2>&1 | tee helper-test.log
+      - name: Native tests (no firmware)
+        if: github.event_name != 'workflow_dispatch'
+        run: scripts/test-wear-native.sh 2>&1 | tee native-test.log
+      - name: Verify preinstalled Android tools
+        shell: bash
+        run: |
+          test -x "$JAVA_HOME_17_X64/bin/javac"
+          test -x "$JAVA_HOME_21_X64/bin/java"
+          test -x "$JAVA_HOME_21_X64/bin/javac"
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+          test -f "$ANDROID_HOME/platforms/android-36/android.jar"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt2"
+          test -f "$ANDROID_HOME/ndk/27.3.13750724/source.properties"
+          test -x "$ANDROID_HOME/cmake/3.31.5/bin/cmake"
+          test -s "$ANDROID_HOME/licenses/android-sdk-license"
+          # No sdkmanager or license acceptance. Missing tools fail this job.
+      - name: Host JNI regression (Java 17, no firmware)
+        if: github.event_name != 'workflow_dispatch'
+        run: scripts/test-wear-jni.sh 2>&1 | tee jni-test.log
+      - name: Native save to Tile reader integration (no firmware)
+        if: github.event_name != 'workflow_dispatch'
+        run: scripts/test-wear-preview-jni.sh 2>&1 | tee preview-jni-test.log
+      - name: Java model tests
+        if: github.event_name != 'workflow_dispatch'
+        run: scripts/test-wear-java.sh 2>&1 | tee ui-test.log
+      - name: Assemble Android device candidates
+        working-directory: wear
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          ./gradlew --no-daemon assembleDebug assembleRelease 2>&1 | tee ../android-build.log
+      - name: Build isolated acceptance package
+        working-directory: wear
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          ./gradlew --no-daemon -PwearTestPackage=true assembleDebug 2>&1 | tee ../isolated-build.log
+          mkdir -p ../build
+          cp app/build/outputs/apk/debug/app-debug.apk ../build/tamaemu-qoltest-debug.apk
+      - name: Build additional isolated audio queue experiments
+        working-directory: wear
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          ./gradlew --no-daemon -PwearTestPackage=true -PwearQaAudioQueueMs=40 assembleDebug 2>&1 | tee ../audio40-build.log
+          cp app/build/outputs/apk/debug/app-debug.apk ../build/tamaemu-qoltest-audio40-debug.apk
+          ./gradlew --no-daemon -PwearTestPackage=true -PwearQaAudioQueueMs=30 assembleDebug 2>&1 | tee ../audio30-build.log
+          cp app/build/outputs/apk/debug/app-debug.apk ../build/tamaemu-qoltest-audio30-debug.apk
+      - name: Inspect all three audio QA experiments before upload
+        run: |
+          python3 scripts/inspect-wear-apk.py build/tamaemu-qoltest-debug.apk --test-package --require-audioqa
+          python3 scripts/inspect-wear-apk.py build/tamaemu-qoltest-audio40-debug.apk --test-package --require-audioqa
+          python3 scripts/inspect-wear-apk.py build/tamaemu-qoltest-audio30-debug.apk --test-package --require-audioqa
+          python3 - <<'PY_AUDIO_METADATA'
+          import os, re, runpy, subprocess
+          from pathlib import Path
+          inspect = runpy.run_path('scripts/inspect-wear-apk.py')
+          aapt = Path(os.environ['ANDROID_HOME']) / 'build-tools/35.0.0/aapt'
+          for name, expected in [('tamaemu-qoltest-debug.apk', 60), ('tamaemu-qoltest-audio40-debug.apk', 40), ('tamaemu-qoltest-audio30-debug.apk', 30)]:
+              apk = Path('build') / name
+              dump = subprocess.check_output([str(aapt), 'dump', 'xmltree', str(apk), 'AndroidManifest.xml'], text=True)
+              manifest, = inspect['children'](inspect['manifest_nodes'](dump), 'manifest')
+              app, = inspect['children'](manifest, 'application')
+              entries = [n for n in inspect['children'](app, 'meta-data') if inspect['text_attr'](n, 'android:name') == 'io.github.projectcetacean.tamaemu.audioqa.NORMAL_QUEUE_MS']
+              entry, = entries
+              value = inspect['attr'](entry, 'android:value')
+              integer = re.search(r'=\(type 0x10\)0x([0-9a-fA-F]+)(?:\s|$)', value)
+              assert integer and int(integer[1], 16) == expected, (name, expected, value)
+              print(f'{name}: actual application metadata integer normalQueueMs={expected}')
+          PY_AUDIO_METADATA
+      - name: Audio QA input unit tests and lint
+        working-directory: wear
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          mkdir -p ../build/qa-input-reports
+          ./gradlew --no-daemon -PwearTestPackage=true testDebugUnitTest --tests '*AudioQaInputAndroidTest*' lintDebug 2>&1 | tee ../build/qa-input-reports/gradle.log
+          python3 - <<'PY_QA_INPUT'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          report = Path('app/build/test-results/testDebugUnitTest/TEST-io.github.projectcetacean.tamaemu.AudioQaInputAndroidTest.xml')
+          suite = ET.parse(report).getroot()
+          cases = suite.findall('testcase')
+          assert int(suite.attrib['tests']) >= 13 and len(cases) >= 13, 'Expected at least 13 executed QA input cases'
+          assert all(int(suite.attrib[key]) == 0 for key in ('failures', 'errors', 'skipped')), suite.attrib
+          assert all(case.find(tag) is None for case in cases for tag in ('failure', 'error', 'skipped')), 'QA input cases must all execute successfully'
+          print(f"Audio QA input: {len(cases)} cases, zero failures/errors/skips")
+          PY_QA_INPUT
+      # Copy before the probe/production rebuilds reuse AGP's default report paths.
+      - name: Capture audio QA input reports
+        if: always()
+        run: |
+          mkdir -p build/qa-input-reports
+          if [ -d wear/app/build/test-results/testDebugUnitTest ]; then
+            cp -R wear/app/build/test-results/testDebugUnitTest build/qa-input-reports/test-results
+          fi
+          if [ -d wear/app/build/reports/tests/testDebugUnitTest ]; then
+            cp -R wear/app/build/reports/tests/testDebugUnitTest build/qa-input-reports/tests
+          fi
+          for report in wear/app/build/reports/lint-results-debug.*; do
+            if [ -f "$report" ]; then cp "$report" build/qa-input-reports/; fi
+          done
+      - name: Upload audio QA input reports
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-input-reports
+          path: build/qa-input-reports/**
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Build explicit Tile transport probe package
+        working-directory: wear
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          ./gradlew --no-daemon -PwearTestPackage=true -PwearTileTransportProbe=true assembleDebug 2>&1 | tee ../tile-transport-probe-build.log
+          cp app/build/outputs/apk/debug/app-debug.apk ../build/tamaemu-tile-transport-probe-debug.apk
+          # Restore the production debug payload before all existing inspection/upload steps.
+          ./gradlew --no-daemon assembleDebug
+      - name: Inspect explicit Tile transport probe
+        run: python3 scripts/inspect-wear-apk.py build/tamaemu-tile-transport-probe-debug.apk --test-package --require-tile-probe
+      - name: Build ARM32 replay measurement executable
+        run: |
+          "$ANDROID_HOME/cmake/3.31.5/bin/cmake" -S wear/native -B build/wear-arm32-probe \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.3.13750724/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Debug \
+            -DTAMAEMU_BUILD_REPLAY_PROBE=ON
+          "$ANDROID_HOME/cmake/3.31.5/bin/cmake" --build build/wear-arm32-probe --target bench_replay --parallel 2
+      - name: Verify Android native optimization
+        run: python3 scripts/verify-wear-native-flags.py 2>&1 | tee native-flags.log
+      - name: Inspect APK
+        run: |
+          python3 scripts/inspect-wear-apk.py wear/app/build/outputs/apk/debug/app-debug.apk
+          python3 scripts/inspect-wear-apk.py wear/app/build/outputs/apk/release/app-release-unsigned.apk --unsigned
+          python3 scripts/inspect-wear-apk.py build/tamaemu-qoltest-debug.apk --test-package --require-audioqa
+          python3 scripts/report-wear-apk-size.py wear/app/build/outputs/apk/debug/app-debug.apk wear/app/build/outputs/apk/release/app-release-unsigned.apk | tee apk-size.log
+      - name: Android unit tests and lint
+        working-directory: wear
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          ./gradlew --no-daemon --continue testDebugUnitTest lintDebug lintRelease :app:dependencies --configuration debugRuntimeClasspath 2>&1 | tee -a ../android-build.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: success()
+        with:
+          name: tamaemu-wear-debug
+          path: |
+            wear/app/build/outputs/apk/debug/app-debug.apk
+            wear/app/build/outputs/apk/release/app-release-unsigned.apk
+            build/tamaemu-qoltest-debug.apk
+            build/tamaemu-qoltest-audio40-debug.apk
+            build/tamaemu-qoltest-audio30-debug.apk
+            build/tamaemu-tile-transport-probe-debug.apk
+            tile-transport-probe-build.log
+            build/wear-arm32-probe/bench_replay
+            apk-size.log
+            isolated-build.log
+            audio40-build.log
+            audio30-build.log
+            wear/app/build/test-results/testDebugUnitTest/**
+            wear/app/build/reports/tests/testDebugUnitTest/**
+            wear/app/build/reports/lint-results-debug.html
+            wear/app/build/reports/lint-results-debug.xml
+            native-test.log
+            jni-test.log
+            preview-jni-test.log
+            helper-test.log
+            native-flags.log
+            build/android-native-flags/*-compile_commands.json
+            ui-test.log
+            android-build.log
+            build/wear-native/Testing/Temporary/LastTest.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve diagnostic logs
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tamaemu-wear-reports
+          path: |
+            tile-transport-probe-build.log
+            audio40-build.log
+            audio30-build.log
+            native-test.log
+            jni-test.log
+            preview-jni-test.log
+            helper-test.log
+            native-flags.log
+            build/android-native-flags/*-compile_commands.json
+            ui-test.log
+            android-build.log
+            wear/app/build/test-results/testDebugUnitTest/**
+            wear/app/build/reports/tests/testDebugUnitTest/**
+            build/wear-native/Testing/Temporary/LastTest.log
+            wear/app/build/reports/lint-results-debug.*
+          if-no-files-found: warn
+          retention-days: 7

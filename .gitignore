@@ -5,6 +5,7 @@ snaps/
 *.sav
 *.sav.bak
 *.sav.bak-*
+*.sav.*
 *.log
 *_btnlog.txt
 flight.bin
@@ -34,3 +35,40 @@ packaging/launcher.res
 *.bat
 logs
 tools\logcap_test.c
+# Private Wear OS inputs, saves, signing material and build outputs
+*.bin
+*.rom
+*.dump
+*.state
+*.state.*
+*.jks
+*.keystore
+local.properties
+.gradle/
+.cxx/
+.externalNativeBuild/
+build/
+.tooling/
+artifacts/
+backups/
+private/
+*.apk
+*.aab
+*.hprof
+
+!wear/gradlew.bat
+
+*.p12
+
+# Local workspaces and operational state
+/.worktrees/
+
+# Local environment, raw audio and private signing inputs
+.env
+.env.*
+!.env.example
+*.pcm
+*.pem
+*.key
+*.pfx
+*.p8

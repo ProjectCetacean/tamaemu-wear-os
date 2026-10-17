@@ -1,0 +1,29 @@
+#!/bin/sh
+# Explicitly installed by scripts/install-public-hooks.py. Arguments may contain
+# private remote URLs: never print or forward them to diagnostics.
+set -eu
+root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo 'Publication hook requires a Git worktree.' >&2
+    exit 2
+}
+cd "$root"
+for checker in check-public-hygiene.py check-public-docs.py check-public-history.py; do
+    if [ ! -f "scripts/$checker" ]; then
+        echo 'Publication hook requires all publication checkers.' >&2
+        exit 2
+    fi
+done
+# Preserve exact input bytes while distinguishing a no-op from a publication.
+push_input=$(mktemp)
+trap 'rm -f "$push_input"' 0
+trap 'exit 2' HUP INT TERM
+cat > "$push_input"
+if [ ! -s "$push_input" ]; then
+    python3 scripts/check-public-history.py --root "$root" --pre-push --check-docs < "$push_input"
+    exit 0
+fi
+python3 scripts/check-public-hygiene.py --root "$root" < /dev/null
+python3 scripts/check-public-docs.py --root "$root" < /dev/null
+# Inspect the exact buffered objects Git is about to publish,
+# every ref, annotated tags and all ancestry, then committed tip documents.
+python3 scripts/check-public-history.py --root "$root" --pre-push --check-docs < "$push_input"

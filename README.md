@@ -1,56 +1,39 @@
-# tamaemu
+# Tamaemu for Wear OS
 
-A Tamagotchi Color emulator for Windows.
+A Wear OS port of [maragotchi's Tamaemu](https://github.com/maragotchi/tamaemu), a Tamagotchi Color emulator. It runs the original LCD and A/B/C controls in a standalone watch app.
 
-Supported devices: P's, iD L (all models), iD, iD Melody, 4U+, 4U, Plus Color, and
-Plus Color (Hexagontchi).
+Supported firmware: Tamagotchi iD L. The watch app requires Android API 26 or later and includes ARM32, ARM64 and x86_64 libraries. Other models and the Windows emulator's connection play are not supported by this port.
 
-This emulator will not work for deka devices or retail-link station devices. It also will not work for anything not listed above.
-
-Same-model connection play is fully fleshed out, so devices can propose, play and exchange gifts!
-
-Cross-model connection play is spotty (ie, connecting an IDL to a P's) so don't rely on it. It might work but it's not 100% there yet.
+Version `0.2.0-wear.9` is unreleased.
 
 ## Firmware
 
-This project does not include or download Tamagotchi firmware and never will. You need a
-rom dump of a device you own. The file is read locally on your device and NEVER uploaded or stored anywhere.
+Firmware is not included or downloaded. You need a compatible local dump that you have the right to use. See the [Wear OS guide](docs/WEAR_OS.md#device-installation-and-updates) for importing it.
 
 ## Controls
 
-|       | A | B | C |
-|-------|---|---|---|
-| keys  | <kbd>Z</kbd> or <kbd>&larr;</kbd> | <kbd>X</kbd> or <kbd>&darr;</kbd> | <kbd>C</kbd> or <kbd>&rarr;</kbd> |
+Use the on-screen A/B/C buttons. Hold the display to open **Settings**. With retractable controls, tap the display to show or hide them.
 
-The on-screen buttons work with clicking, too! These keys are rebindable in the emulator settings.
-
-- <kbd>+</kbd> / <kbd>&minus;</kbd> — speed the game clock up or down
-  (1x to 600x). <kbd>0</kbd> resets to 1x. 
-  When you speed the emulator up, your Tamagotchi ages faster. Animations and sound stay at normal speed.
-
-## Connection play
-
-Run two instances with DIFFERENT saves. They find each other automatically. Connection play is just like it is on the normal hardware, so if you're confused just look up guides on how to connect them.
-
-| pair | can connect? |
-|------|--------------|
-| P's + P's | yes |
-| iD L + iD L | yes |
-| iD + iD | yes |
-| iD Melody + iD Melody | yes |
-| iD + iD Melody | yes |
-| Plus Color + Plus Color | yes |
-| Hexagontchi + Hexagontchi | yes |
-| 4U or 4U+ pair | yes |
-| mixed pairings | soon... |
+Settings include display size, integer scaling, LCD effects and sharpness, button position, colors, sound, haptics and screen timeout. The [Wear OS guide](docs/WEAR_OS.md) describes each option.
 
 ## Saves
 
-Saves are stored in a folder where the .bin was selected. They're titled after the device you're currently playing. If the folder doesn't exist yet, the emulator will create one on your behalf. 
+Saves stay in the app's private storage. **Normal** mode accounts for time away, with the firmware's original care consequences. **Protected** pauses future away time; it does not provide automatic care. Background jobs use a 60-second replay allowance on a 15-minute periodic schedule. Android can delay or stop them, so long gaps can still require catch-up on reopening.
 
-## Licence
+Catch-up batches idle CPU work and timer comparisons. Catch-up progress updates are limited to 10 per second without changing aging or owed time.
 
-GPL-3.0 — see `LICENSE`.
+Back up the save before updating and use the same signing identity. Do not uninstall or clear app data to work around an update failure.
 
-Tamagotchi firmware is not covered by this licence and is not included; it is
-Bandai's, and you supply your own dump! 
+## Limits
+
+Sound plays in the foreground only. Rapid-press sound lag remains unresolved. The Tile shows a saved LCD image and opens the app when tapped; it is not live. Watch-clock autosync, multiplayer, automatic care and a live-pet widget are not included. Battery life, sustained gameplay and accessibility still need watch testing.
+
+## Building and installing
+
+See the [Wear OS guide](docs/WEAR_OS.md#build-prerequisites) for build tools, checks, signing and installation, [verification](docs/VERIFICATION.md) for test coverage and limits, and [release notes](docs/RELEASE_NOTES.md) for current changes. Contributions are covered in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+The inherited [device map](docs/device-map.md) and [Windows packaging notes](packaging/README.txt) describe the upstream desktop emulator.
+
+## License
+
+[GPL-3.0](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for build and test dependencies. Tamagotchi firmware is not covered by this license and is not distributed here.
