@@ -97,6 +97,53 @@ class PublicationPolicyTests(unittest.TestCase):
         del data['protection']['body']['required_pull_request_reviews']['bypass_pull_request_allowances']
         self.assert_blocked(data, 'branch.no_bypass')
 
+    def personal_without_bypass(self):
+        data = evidence()
+        data['repository']['body']['owner'] = {'type': 'User', 'login': 'sample'}
+        del data['protection']['body']['required_pull_request_reviews']['bypass_pull_request_allowances']
+        return data
+
+    def test_verified_personal_owner_allows_absent_bypass_node(self):
+        for login in ['sample', 'Sample']:
+            with self.subTest(login=login):
+                data = self.personal_without_bypass()
+                data['repository']['body']['owner']['login'] = login
+                result, report = self.run_fixture(data)
+                self.assertEqual(result.returncode, 0, report['failures'])
+                self.assertTrue(report['policy_matches'])
+                self.assertFalse(report['launch_ready'])
+
+    def test_personal_owner_explicit_bypass_actor_blocks(self):
+        for actor_kind in ['users', 'teams', 'apps']:
+            with self.subTest(actor_kind=actor_kind):
+                data = self.personal_without_bypass()
+                bypass = {'users': [], 'teams': [], 'apps': []}
+                bypass[actor_kind] = [{'login': 'example'}]
+                data['protection']['body']['required_pull_request_reviews']['bypass_pull_request_allowances'] = bypass
+                self.assert_blocked(data, 'branch.no_bypass')
+
+    def test_personal_owner_present_null_or_malformed_bypass_blocks(self):
+        for malformed in [None, [], 'invalid', {}, {'users': [], 'teams': []},
+                          {'users': None, 'teams': [], 'apps': []},
+                          {'users': [], 'teams': [], 'apps': 'invalid'}]:
+            with self.subTest(case=repr(malformed)):
+                data = self.personal_without_bypass()
+                data['protection']['body']['required_pull_request_reviews']['bypass_pull_request_allowances'] = malformed
+                self.assert_blocked(data, 'branch.no_bypass')
+
+    def test_organization_owner_missing_bypass_still_blocks(self):
+        data = self.personal_without_bypass()
+        data['repository']['body']['owner']['type'] = 'Organization'
+        self.assert_blocked(data, 'branch.no_bypass')
+
+    def test_unknown_or_mismatched_owner_missing_bypass_blocks(self):
+        for owner in [None, {}, [], {'type': 'User'}, {'type': 'User', 'login': 'other'},
+                      {'type': 'user', 'login': 'sample'}, {'login': 'sample'}]:
+            with self.subTest(case=repr(owner)):
+                data = self.personal_without_bypass()
+                data['repository']['body']['owner'] = owner
+                self.assert_blocked(data, 'branch.no_bypass')
+
     def test_private_preview_never_matches_public_policy(self):
         data = evidence()
         data['repository']['body'].update(private=True, visibility='private')

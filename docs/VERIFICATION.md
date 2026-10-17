@@ -47,6 +47,8 @@ python3 scripts/check-github-publication-policy.py --repo OWNER/REPO
 
 The future public repository must retain the upstream fork relationship, enable native secret scanning and push protection, and protect its default branch with the required `Public hygiene` status and no force pushes, deletion or bypass. The policy check verifies settings; it does not enable them. An unavailable setting or private preview is not public-launch clearance.
 
+[GitHub supports bypass-list actors only for organization-owned repositories](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches). The policy check accepts an omitted bypass list only when the repository API verifies a personal owner with the matching login. A present bypass object must contain empty users, teams and apps lists. Organization or unknown owners still require that explicit evidence.
+
 Review the exact source commit, its outgoing history and each artifact intended for distribution. Passing source checks does not inspect a later commit or prove that a separately built APK contains only that source. Keep APK privacy, signing and alignment checks tied to the actual binary. Human review and an explicit release decision are still required. These helpers do not publish a repository or release.
 
 ## Watch testing
