@@ -6,7 +6,7 @@ The tests use synthetic inputs and do not require proprietary firmware.
 
 The [Wear workflow](../.github/workflows/wear.yml) runs:
 
-- Python helper tests, native CTest, host JNI, native-save-to-Tile-reader tests and Java model tests.
+- Python helper tests, the upstream desktop suite, native CTest, host JNI, native-save-to-Tile-reader tests and Java model tests.
 - Debug and Release builds, separate audio QA builds and a Tile transport test build.
 - Native compiler-flag checks across three ABIs, APK privacy, signature and alignment checks, and checks that test code stays out of production builds.
 - Android unit tests, QA-input tests and Debug/Release lint.
@@ -14,6 +14,16 @@ The [Wear workflow](../.github/workflows/wear.yml) runs:
 The [Wear OS guide](WEAR_OS.md#build-prerequisites) lists the tools and commands. Manual workflow runs skip the repeated host tests, so use a full pull-request run to run every automated check. Check the run for the commit you plan to build or distribute.
 
 These checks do not establish firmware compatibility or watch behavior. Synthetic audio timing does not measure input-to-speaker delay.
+
+## Upstream desktop checks
+
+On a POSIX host with an existing C compiler, run the inherited firmware-free suite:
+
+```sh
+scripts/test-upstream-desktop.sh
+```
+
+The helper compiles `tests/test_all.c` and its core, save-container and download-library dependencies. It runs in a separate ignored directory with synthetic files and loopback connections. It does not build or test the Windows launcher, SDL rendering or watch save migration. Windows-specific save-path expectations remain in the source suite.
 
 ## Publication checks
 

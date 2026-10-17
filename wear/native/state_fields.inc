@@ -1,4 +1,5 @@
-/* Format v1: canonical little-endian primitive fields, no padding/pointers.
+/* Canonical little-endian primitive fields, no padding/pointers.
+ * v1-v3 use 2048 download RAM bytes; v4 uses the expanded 4096-byte map.
  * Declaration order is fixed for save compatibility. Bump version on edits.
  * Device profile is fixed to idl; standalone links and diagnostic pointers
  * are reconstructed as NULL. Tone ring entries include all pending events. */

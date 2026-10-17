@@ -44,10 +44,10 @@ public final class PreviewJniProbe {
 
     private static void receipt(Path save, byte[] bytes, byte[] nativeHash, long[] life)
             throws Exception {
-        check(bytes.length == 8536509, "actual native v3 exact file length");
+        check(bytes.length == 8538557, "actual native v4 exact file length");
         ByteBuffer header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
-        check(header.getLong(8) == 3 && header.getLong(16) == 8536413,
-                "actual native v3 header");
+        check(header.getLong(8) == 4 && header.getLong(16) == 8538461,
+                "actual native v4 header");
         byte[] expected = checksum(Arrays.copyOfRange(bytes, 96, bytes.length));
         check(Arrays.equals(expected, Arrays.copyOfRange(bytes, 56, 88)),
                 "independent SHA256 equals native header checksum");
@@ -57,7 +57,7 @@ public final class PreviewJniProbe {
         for (int slot = 0; slot < 8; slot++)
             check(trailer.getLong() == life[slot], "exact native trailer slot " + slot);
         PetPreviewStore.CommittedReceipt read = PetPreviewStore.readCommittedReceipt(save.toFile());
-        check(read != null, "Java reader accepts native initialized v3");
+        check(read != null, "Java reader accepts native initialized v4");
         check(Arrays.equals(read.payloadDigest(), expected), "Java receipt exact checksum");
         check(read.wallUtcMillis == life[1], "Java receipt exact accounting wall anchor");
         check(read.elapsedRealtimeMillis == life[2], "Java receipt exact elapsed time");

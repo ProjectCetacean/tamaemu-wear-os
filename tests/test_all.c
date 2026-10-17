@@ -1,8 +1,12 @@
+/* POSIX build portability changes: October 2026. */
 #include "../src/emu.h"
+#include "../src/desktop_tamasave.h"
+#include "../src/tamasave.h"
 #include "../tools/dlc.h"
 #include "../tools/swapreq.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <math.h>
 #include <sys/stat.h>
 #ifdef _WIN32
@@ -10,6 +14,7 @@
 #define TEST_MKDIR(p) _mkdir(p)
 #define TEST_RMDIR(p) _rmdir(p)
 #else
+#include <unistd.h>
 #define TEST_MKDIR(p) mkdir(p, 0700)
 #define TEST_RMDIR(p) rmdir(p)
 #endif
@@ -37,6 +42,516 @@ static Emu *fresh(void)
     return fresh_dev(device_default());
 }
 
+typedef struct TestStateHeader {
+    char magic[8], build[32], device[32];
+    uint32_t version, emu_size, rom_size, flash_crc;
+} TestStateHeader;
+
+static void test_default_save_folder(void)
+{
+    const DeviceProfile *dev = device_find("plus-color");
+    char path[512];
+    CHECK(dev != NULL, "Plus Color profile is available for save-path test");
+    if (!dev) return;
+#ifdef _WIN32
+    const char *rom = "C:\\roms\\Tamagotchi_PlusColor.bin";
+    const char *expected = "C:\\roms\\saves\\tamagotchi_plus-color\\Tamagotchi_PlusColor.bin\\save.sav";
+#else
+    const char *rom = "/roms/Tamagotchi_PlusColor.bin";
+    const char *expected = "/roms/saves/tamagotchi_plus-color/Tamagotchi_PlusColor.bin/save.sav";
+#endif
+    CHECK(savepath_default(path, sizeof path, rom, dev) && !strcmp(path, expected),
+          "default save is grouped under its ROM name: %s", path);
+}
+
+static void test_save_folder_migration(void)
+{
+    const char *root = "save_migration_test";
+#ifdef _WIN32
+    const char *legacy = "save_migration_test\\old.sav";
+    const char *save = "save_migration_test\\Tamagotchi.bin\\save.sav";
+    const char *oldram = "save_migration_test\\old.sav.ram";
+    const char *oldstate = "save_migration_test\\old.sav.state";
+    const char *newram = "save_migration_test\\Tamagotchi.bin\\save.sav.ram";
+    const char *newstate = "save_migration_test\\Tamagotchi.bin\\save.sav.state";
+    const char *bundle = "save_migration_test\\Tamagotchi.bin";
+#else
+    const char *legacy = "save_migration_test/old.sav";
+    const char *save = "save_migration_test/Tamagotchi.bin/save.sav";
+    const char *oldram = "save_migration_test/old.sav.ram";
+    const char *oldstate = "save_migration_test/old.sav.state";
+    const char *newram = "save_migration_test/Tamagotchi.bin/save.sav.ram";
+    const char *newstate = "save_migration_test/Tamagotchi.bin/save.sav.state";
+    const char *bundle = "save_migration_test/Tamagotchi.bin";
+#endif
+    const char *oldbak = "save_migration_test\\old.sav.bak";
+    const char *newbak = "save_migration_test\\Tamagotchi.bin\\save.sav.bak";
+#ifndef _WIN32
+    oldbak = "save_migration_test/old.sav.bak";
+    newbak = "save_migration_test/Tamagotchi.bin/save.sav.bak";
+#endif
+    const char *oldfiles[] = { legacy, oldram, oldstate, oldbak };
+    const char *newfiles[] = { save, newram, newstate, newbak };
+    TEST_MKDIR(root); TEST_MKDIR(bundle);
+    for (int i = 0; i < 4; i++) {
+        FILE *f = fopen(oldfiles[i], "wb");
+        if (f) { fputs("save bundle", f); fclose(f); }
+    }
+    CHECK(savepath_migrate_legacy(legacy, save) == 1,
+          "legacy save bundle migrates into its ROM folder");
+    for (int i = 0; i < 4; i++) {
+        FILE *f = fopen(newfiles[i], "rb");
+        CHECK(f != NULL, "migrated bundle keeps %s", newfiles[i]);
+        if (f) fclose(f);
+        f = fopen(oldfiles[i], "rb");
+        CHECK(f == NULL, "legacy bundle no longer keeps %s", oldfiles[i]);
+        if (f) fclose(f);
+        remove(newfiles[i]);
+    }
+    TEST_RMDIR(bundle); TEST_RMDIR(root);
+}
+
+static void test_state_save_lock(void)
+{
+    const char *path = "state_lock_test.tmp";
+    char why[128];
+    uintptr_t first = 0, second = 0;
+
+    CHECK(state_sav_lock_acquire(path, &first, why, sizeof why) == 1 && first != 0,
+          "first window acquires its save lock: %s", why);
+    CHECK(state_sav_lock_acquire(path, &second, why, sizeof why) == 0 && second == 0,
+          "second window is refused while that save is in use: %s", why);
+    state_sav_lock_release(&first);
+    CHECK(state_sav_lock_acquire(path, &second, why, sizeof why) == 1 && second != 0,
+          "save lock is available after the first window closes: %s", why);
+    state_sav_lock_release(&second);
+    remove("state_lock_test.tmp.lock");
+}
+
+static void test_state_snapshot(void)
+{
+    const DeviceProfile *dev = device_default();
+    const char *path = "state_test.tmp";
+    const char *statepath = "state_test.tmp.state";
+    const char *build = "test-build";
+    Emu saved, restored;
+    char why[128];
+    FILE *f;
+
+    memset(&saved, 0, sizeof saved);
+    saved.dev = *dev;
+    saved.rom = malloc(dev->rom_size);
+    CHECK(saved.rom != NULL, "state fixture ROM allocated");
+    if (!saved.rom) return;
+    memset(saved.rom, 0xFF, dev->rom_size);
+    saved.pc = 0x0240A5B6u;
+    saved.cycles = 123456789u;
+    saved.a0ram[0x123] = 0xA0;
+    saved.ivram[0x234] = 0x1B;
+    saved.dstram[0x345] = 0xD5;
+    saved.lcd.gram[3][4] = 0x5A5A;
+    saved.t16[2].counter = 0x1234;
+    saved.t16[2].accum = 0x89ABCDEFu;
+    saved.tracef = (FILE *)(uintptr_t)1;
+    saved.lcd.logf = (FILE *)(uintptr_t)2;
+    saved.link = (Link *)(uintptr_t)3;
+    saved.nfc_peer = (Emu *)(uintptr_t)4;
+    saved.nfc_vpeer = (NfcPeer *)(uintptr_t)5;
+    memset(&saved.auto_link_storage, 0xA5, sizeof saved.auto_link_storage);
+    saved.auto_link = true;
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1,
+          "state snapshot written: %s", why);
+    {
+        uint8_t *encoded = NULL, *from_file = NULL;
+        size_t encoded_len = 0;
+        long file_len = -1;
+        FILE *state_file = fopen(statepath, "rb");
+        CHECK(state_encode(&saved, build, &encoded, &encoded_len, why, sizeof why) == 1,
+              "state snapshot encodes in memory: %s", why);
+        CHECK(state_file != NULL && fseek(state_file, 0, SEEK_END) == 0 &&
+              (file_len = ftell(state_file)) >= 0 && fseek(state_file, 0, SEEK_SET) == 0,
+              "legacy state file is readable for encoder equivalence");
+        if (state_file && file_len >= 0) {
+            from_file = malloc((size_t)file_len);
+            CHECK(from_file != NULL && fread(from_file, 1, (size_t)file_len, state_file) == (size_t)file_len,
+                  "legacy state file bytes read for encoder equivalence");
+            CHECK(encoded_len == (size_t)file_len && !memcmp(encoded, from_file, encoded_len),
+                  "in-memory state encoding is byte-identical to legacy state file");
+            if (encoded) {
+                Emu decoded;
+                memset(&decoded, 0, sizeof decoded);
+                decoded.dev = *dev;
+                decoded.rom = malloc(dev->rom_size);
+                if (decoded.rom) {
+                    memset(decoded.rom, 0xFF, dev->rom_size);
+                    CHECK(state_decode(&decoded, encoded, encoded_len, build, why, sizeof why) == STATE_LOADED &&
+                          decoded.pc == saved.pc && decoded.cycles == saved.cycles,
+                          "in-memory state decoder uses the snapshot validation and restore path: %s", why);
+                    free(decoded.rom);
+                }
+            }
+        }
+        if (state_file) fclose(state_file);
+        free(from_file);
+        free(encoded);
+    }
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    restored.auto_link = true;  /* the new launcher sets this before loading */
+    CHECK(restored.rom != NULL, "state restore ROM allocated");
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        memset(fresh_rom, 0xFF, dev->rom_size);
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_LOADED,
+              "state snapshot restored: %s", why);
+        CHECK(restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev),
+              "restore preserves fresh ROM pointer and device profile");
+        CHECK(restored.pc == 0x0240A5B6u && restored.cycles == 123456789u,
+              "CPU state restored: pc=%08x cycles=%llu", restored.pc,
+              (unsigned long long)restored.cycles);
+        CHECK(restored.a0ram[0x123] == 0xA0 && restored.ivram[0x234] == 0x1B &&
+              restored.dstram[0x345] == 0xD5, "A0/IV/DSR RAM restored");
+        CHECK(restored.lcd.gram[3][4] == 0x5A5A, "LCD RAM restored");
+        CHECK(restored.t16[2].counter == 0x1234 && restored.t16[2].accum == 0x89ABCDEFu,
+              "timer state restored");
+        CHECK(restored.tracef == NULL && restored.lcd.logf == NULL && restored.link == NULL &&
+              restored.nfc_peer == NULL && restored.nfc_vpeer == NULL && restored.auto_link &&
+              !memcmp(&restored.auto_link_storage, &(Link){0}, sizeof(Link)),
+              "host resources are re-seeded while fresh auto-link configuration survives restore");
+        free(restored.rom);
+    }
+
+    f = fopen(statepath, "wb");
+    if (f) { fputs("short", f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev),
+              "truncated state rejected without changing fresh setup: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { fputc('X', f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "magic") != NULL, "wrong magic rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { uint32_t bad = 99; fseek(f, (long)offsetof(TestStateHeader, version), SEEK_SET); fwrite(&bad, 1, sizeof bad, f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "version") != NULL, "wrong version rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { uint32_t bad = 1; fseek(f, (long)offsetof(TestStateHeader, emu_size), SEEK_SET); fwrite(&bad, 1, sizeof bad, f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "Emu size") != NULL, "wrong Emu size rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { uint32_t bad = 1; fseek(f, (long)offsetof(TestStateHeader, rom_size), SEEK_SET); fwrite(&bad, 1, sizeof bad, f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED &&
+              strstr(why, "ROM size") != NULL, "wrong ROM size rejected specifically: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { fseek(f, (long)offsetof(TestStateHeader, device), SEEK_SET); fputs("wrong-device", f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED && restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev) && strstr(why, "device") != NULL, "wrong device rejected: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    f = fopen(statepath, "r+b");
+    if (f) { fseek(f, (long)offsetof(TestStateHeader, build), SEEK_SET); fputs("wrong-build", f); fclose(f); }
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) memset(restored.rom, 0xFF, dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED && restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev) && strstr(why, "build") != NULL, "wrong build rejected: %s", why);
+        free(restored.rom);
+    }
+
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1, "state re-written");
+    saved.rom[0] ^= 1;
+    memset(&restored, 0, sizeof restored); restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        uint8_t *fresh_rom = restored.rom;
+        memcpy(fresh_rom, saved.rom, dev->rom_size);
+        CHECK(state_load(&restored, path, build, why, sizeof why) == STATE_REJECTED && restored.rom == fresh_rom && !memcmp(&restored.dev, dev, sizeof *dev) && strstr(why, "checksum") != NULL, "stale flash state rejected: %s", why);
+        free(restored.rom);
+    }
+    free(saved.rom);
+    remove(path);
+    remove(statepath);
+}
+
+/* The launch path must treat the raw .sav as flash authority: a rejected STAT
+ * still restores the container's RAM, while corrupt/absent containers do not. */
+static void test_container_restore(void)
+{
+    const DeviceProfile *dev = device_default();
+    const char *savpath = "container_restore_test.tmp";
+    const char *build = "test-build";
+    Emu saved, restored;
+    uint8_t *stat = NULL;
+    size_t stat_len = 0;
+    StateResult result;
+    char why[128];
+    FILE *f;
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    CHECK(restored.rom != NULL, "container-restore absent fixture ROM allocated");
+    if (!restored.rom) return;
+    memset(restored.rom, 0xFF, dev->rom_size);
+    restored.a0ram[0x17] = 0x11;
+    result = STATE_LOADED;
+    CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 0 &&
+          result == STATE_NONE && restored.a0ram[0x17] == 0x11,
+          "absent cross save leaves a normal flash boot untouched: %s", why);
+    free(restored.rom);
+
+    memset(&saved, 0, sizeof saved);
+    saved.dev = *dev;
+    saved.rom = malloc(dev->rom_size);
+    CHECK(saved.rom != NULL, "container-restore saved fixture ROM allocated");
+    if (!saved.rom) return;
+    memset(saved.rom, 0xFF, dev->rom_size);
+    saved.pc = 0x02401234u;
+    saved.a0ram[0x17] = 0xA7;
+    CHECK(state_encode(&saved, build, &stat, &stat_len, why, sizeof why),
+          "native STAT encodes for container restore: %s", why);
+    CHECK(desktop_write_tamasave(savpath, "container_restore_test.tmp.tamasave",
+                                 dev->name, saved.rom, dev->rom_size,
+                                 saved.a0ram, dev->a0ram_size, stat, stat_len,
+                                 build, why, sizeof why),
+          "container restore fixture writes: %s", why);
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    CHECK(restored.rom != NULL, "container-restore destination ROM allocated");
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        result = STATE_NONE;
+        CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 1 &&
+              result == STATE_LOADED && restored.a0ram[0x17] == 0xA7 && restored.pc == saved.pc,
+              "container restores RAM and compatible native STAT: %s", why);
+
+        /* Re-encode a valid container with a previous-build STAT.  Only the
+         * native snapshot is incompatible; portable RAM must still load. */
+        {
+            TamaSave changed = {0};
+            uint8_t *wire = NULL, *rewritten = NULL, *prior_stat = NULL;
+            size_t rewritten_len = 0, prior_stat_len = 0;
+            long file_len = -1;
+            FILE *container = fopen("container_restore_test.tmp.tamasave", "rb");
+            CHECK(container != NULL && fseek(container, 0, SEEK_END) == 0 &&
+                  (file_len = ftell(container)) >= 0 && fseek(container, 0, SEEK_SET) == 0,
+                  "prior-build container fixture is readable");
+            if (container && file_len >= 0) {
+                wire = malloc((size_t)file_len);
+                CHECK(wire != NULL && fread(wire, 1, (size_t)file_len, container) == (size_t)file_len &&
+                      fclose(container) == 0, "prior-build container fixture read");
+                container = NULL;
+            }
+            if (container) fclose(container);
+            if (wire && state_encode(&saved, "prior-build", &prior_stat, &prior_stat_len, why, sizeof why) &&
+                tamasave_decode(wire, (size_t)file_len, &changed, why, sizeof why)) {
+                free(changed.state);
+                changed.state = prior_stat; changed.state_len = prior_stat_len; prior_stat = NULL;
+                memset(changed.state_build, 0, sizeof changed.state_build);
+                strcpy(changed.state_build, "prior-build");
+                CHECK(tamasave_encode(&changed, &rewritten, &rewritten_len, why, sizeof why),
+                      "previous-build STAT container re-encodes: %s", why);
+                container = fopen("container_restore_test.tmp.tamasave", "wb");
+                CHECK(container != NULL && fwrite(rewritten, 1, rewritten_len, container) == rewritten_len &&
+                      fclose(container) == 0, "previous-build STAT container written");
+                container = NULL;
+                memset(&restored, 0, sizeof restored);
+                restored.dev = *dev; restored.rom = malloc(dev->rom_size);
+                if (restored.rom) {
+                    memset(restored.rom, 0xFF, dev->rom_size); restored.pc = 0x11111111u;
+                    result = STATE_NONE;
+                    CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 1 &&
+                          result == STATE_REJECTED && restored.a0ram[0x17] == 0xA7 &&
+                          restored.pc == 0x11111111u && strstr(why, "build identifier") != NULL,
+                          "previous-build STAT cold-boots with restored RAM: %s", why);
+                    free(restored.rom);
+                }
+            }
+            free(prior_stat); free(wire); free(rewritten); tamasave_free(&changed);
+            CHECK(desktop_write_tamasave(savpath, "container_restore_test.tmp.tamasave",
+                                         dev->name, saved.rom, dev->rom_size,
+                                         saved.a0ram, dev->a0ram_size, stat, stat_len,
+                                         build, why, sizeof why),
+                  "compatible container restored after prior-build test: %s", why);
+        }
+
+        /* An externally patched .sav rejects only STAT; RAM remains portable. */
+        memset(&restored, 0, sizeof restored);
+        restored.dev = *dev;
+        restored.rom = malloc(dev->rom_size);
+        if (restored.rom) {
+            memset(restored.rom, 0xFF, dev->rom_size);
+            restored.rom[0] ^= 1;
+            restored.pc = 0x11111111u;
+            result = STATE_NONE;
+            CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == 1 &&
+                  result == STATE_REJECTED && restored.a0ram[0x17] == 0xA7 &&
+                  restored.pc == 0x11111111u && strstr(why, "flash checksum") != NULL,
+                  "stale STAT cold-boots with restored RAM after raw .sav changes: %s", why);
+            free(restored.rom);
+        }
+    }
+
+    free(stat);
+
+    f = fopen("container_restore_test.tmp.tamasave", "wb");
+    CHECK(f != NULL && fputs("bad", f) >= 0 && fclose(f) == 0,
+          "corrupt container fixture written");
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        restored.a0ram[0x17] = 0x22;
+        result = STATE_LOADED;
+        CHECK(desktop_restore_tamasave(savpath, &restored, build, 1, &result, why, sizeof why) == -1 &&
+              result == STATE_NONE && restored.a0ram[0x17] == 0x22 &&
+              why[0] != '\0',
+              "corrupt cross save is retained and restores nothing: %s", why);
+        free(restored.rom);
+    }
+    f = fopen("container_restore_test.tmp.tamasave", "rb");
+    CHECK(f != NULL, "corrupt cross save remains in place for a later successful exit write");
+    if (f) fclose(f);
+
+    free(saved.rom);
+    remove("container_restore_test.tmp.tamasave");
+}
+
+static void test_state_lifecycle(void)
+{
+    const DeviceProfile *dev = device_default();
+    const char *path = "state_lifecycle_test.tmp";
+    const char *statepath = "state_lifecycle_test.tmp.state";
+    const char *build = "test-build";
+    Emu saved, restored;
+    char why[128];
+
+    memset(&saved, 0, sizeof saved);
+    saved.dev = *dev;
+    saved.rom = malloc(dev->rom_size);
+    CHECK(saved.rom != NULL, "lifecycle fixture ROM allocated");
+    if (!saved.rom) return;
+    memset(saved.rom, 0xFF, dev->rom_size);
+    saved.pc = 0x0240A5B6u;
+    saved.cycles = 123456789u;
+    CHECK(state_save(&saved, path, build, why, sizeof why) == 1,
+          "lifecycle state written: %s", why);
+
+    CHECK(state_session_eligible(true, false, false, false, false, false),
+          "interactive standalone session is state-eligible");
+    CHECK(!state_session_eligible(false, false, false, false, false, false) &&
+          !state_session_eligible(true, true, false, false, false, false) &&
+          !state_session_eligible(true, false, true, false, false, false) &&
+          !state_session_eligible(true, false, false, true, false, false) &&
+          !state_session_eligible(true, false, false, false, true, false) &&
+          !state_session_eligible(true, false, false, false, false, true),
+          "non-interactive, link/network, and --no-state sessions are ineligible");
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        CHECK(state_restore_or_reset(&restored, path, build, true, false, why, sizeof why) == STATE_LOADED &&
+              restored.pc == 0x0240A5B6u && restored.cycles == 123456789u,
+              "successful restore skips reset: pc=%08x cycles=%llu", restored.pc,
+              (unsigned long long)restored.cycles);
+        free(restored.rom);
+    }
+
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        CHECK(state_restore_or_reset(&restored, path, build, true, true, why, sizeof why) == STATE_NONE &&
+              restored.pc != 0x0240A5B6u,
+              "--restart skips restore and performs a cold reset");
+        CHECK(state_save_on_exit(&restored, path, build, true, why, sizeof why) == 1,
+              "--restart still permits state writing: %s", why);
+        free(restored.rom);
+    }
+
+    remove(statepath);
+    memset(&restored, 0, sizeof restored);
+    restored.dev = *dev;
+    restored.rom = malloc(dev->rom_size);
+    if (restored.rom) {
+        memset(restored.rom, 0xFF, dev->rom_size);
+        CHECK(state_restore_or_reset(&restored, path, build, false, false, why, sizeof why) == STATE_NONE &&
+              restored.pc != 0x0240A5B6u &&
+              state_save_on_exit(&restored, path, build, false, why, sizeof why) == 0,
+              "--no-state skips both restore and writing");
+        {
+            FILE *f = fopen(statepath, "rb");
+            CHECK(f == NULL, "--no-state leaves no state file");
+            if (f) fclose(f);
+        }
+        free(restored.rom);
+    }
+
+    saved.stopped = true;
+    CHECK(state_save_on_exit(&saved, path, build, true, why, sizeof why) == 0,
+          "faulted core skips state writing");
+    saved.stopped = false;
+    {
+        Link active_link;
+        memset(&active_link, 0, sizeof active_link);
+        saved.link = &active_link;
+        CHECK(state_save_on_exit(&saved, path, build, true, why, sizeof why) == 1,
+              "a live auto-link session writes a restart-safe snapshot: %s", why);
+        saved.link = NULL;
+    }
+    free(saved.rom);
+    remove(path);
+    remove(statepath);
+}
+
 static void load_prog(Emu *e, uint32_t addr, const uint16_t *hws, int n)
 {
     for (int i = 0; i < n; i++) mem_write16(e, addr + (uint32_t)i * 2, hws[i]);
@@ -53,6 +568,15 @@ static void test_mem(void)
     CHECK(mem_read8(e, 0x00500000) == 0, "unmapped reads 0");
     mem_write32(e, 0x80000, 0xCAFEF00D);
     CHECK(mem_read32(e, 0x80000) == 0xCAFEF00D, "ivram roundtrip");
+}
+
+static void test_mem_dstram_past_0x84800(void)
+{
+    Emu *e = fresh();
+    mem_write16(e, 0x84808, 0xFFF8);
+    mem_write8(e, 0x8480B, 0x0B);
+    CHECK(mem_read16(e, 0x84808) == 0xFFF8, "DSTRAM word past 0x84800 roundtrips");
+    CHECK(mem_read8(e, 0x8480B) == 0x0B, "DSTRAM byte past 0x84800 roundtrips");
 }
 
 static void test_cpu_alu(void)
@@ -366,6 +890,35 @@ static void test_link_hub_relay(void)
           (unsigned long long)link_send_fails(&g1));
 
     link_close(&g1); link_close(&g2); link_close(&g3); link_close(&hub);
+}
+
+/* The UI loop must not wait for connect(). With a listener already open, the
+ * joiner starts connecting and link_auto_poll() finishes the job. */
+static void test_link_auto_join(void)
+{
+    const int port = 47882;
+    static Link hub, joiner;
+    link_reset(&hub); link_reset(&joiner);
+    if (link_auto_begin(&hub, port) || !hub.listening) {
+        fprintf(stderr, "[test] port %d unavailable - skipping auto join test\n", port);
+        return;
+    }
+
+    CHECK(link_auto_begin(&joiner, port) == 0,
+          "auto-join starts without reporting a synchronous connection");
+    CHECK(joiner.joining && !joiner.listening && !joiner.net,
+          "joining side has an in-flight socket, not a blocking connection");
+
+    uint64_t deadline = link_now_us() + 1000000;
+    while ((!joiner.net || hub.nsock != 1) && link_now_us() < deadline) {
+        link_auto_poll(&hub);
+        link_auto_poll(&joiner);
+    }
+    CHECK(joiner.net && hub.nsock == 1,
+          "auto-join connects through polling (joiner=%d hub sockets=%d)",
+          joiner.net, hub.nsock);
+
+    link_close(&joiner); link_close(&hub);
 }
 
 /* Explicit timestamps test collision policy without depending on scheduling. */
@@ -752,6 +1305,22 @@ static void test_cpu_bad_pc_trap(void)
     CHECK(!e->stopped, "IVRAM execution not trapped: %s", e->stop_reason);
 }
 
+static void test_cpu_pc_masks_to_28_bits(void)
+{
+    Emu *e = fresh();
+    static const uint16_t jp_r0[] = { 0x0680 };      /* jp %r0 */
+    load_prog(e, 0x1000, jp_r0, 1);
+    mem_write16(e, 0x1200, 0x6C11);                  /* ld.w %r1,1 */
+    e->r[0] = 0x10000000u | 0x1200u;
+
+    cpu_step(e);
+    CHECK(e->pc == 0x10001200u, "jp preserves the encoded bus-overflow target: pc=%08x", e->pc);
+    cpu_step(e);
+    CHECK(!e->stopped, "masked target executes instead of trapping: %s", e->stop_reason);
+    CHECK(e->r[1] == 1 && e->pc == 0x1202, "pc masks to RAM target and executes: r1=%x pc=%08x",
+          e->r[1], e->pc);
+}
+
 /* Exercise ranged NOR-write logging and its line budget. */
 /* AMD unlock addresses are relative to the selected device's ROM base. */
 static void unlock_program(Emu *e)
@@ -811,6 +1380,25 @@ static void test_device_table(void)
                   "shows whether the profile is read or ignored", n);
     CHECK(device_find("no-such-device") == NULL, "unknown device is rejected");
     CHECK(!strcmp(device_default()->name, "ps"), "the default machine is the P's");
+
+    const DeviceProfile *nfc = device_find("4u"), *ir = device_find("ps");
+    CHECK(nfc && ir, "NFC and IR profiles are available for port selection");
+    if (nfc && ir) {
+        CHECK(auto_link_default_port(nfc, 7878, false) == 7879,
+              "NFC auto-link defaults one port above the IR bus");
+        CHECK(auto_link_default_port(ir, 7878, false) == 7878,
+              "IR auto-link retains its existing port");
+        CHECK(auto_link_default_port(nfc, 9010, true) == 9010,
+              "an explicit NFC port is not remapped");
+    }
+
+    uint64_t last_poll = 1000;
+    CHECK(!host_interval_due(1099, &last_poll, 100),
+          "host poll stays quiet before its interval expires");
+    CHECK(host_interval_due(1100, &last_poll, 100) && last_poll == 1100,
+          "host poll becomes due at its interval and advances its timestamp");
+    CHECK(!host_interval_due(1100, &last_poll, 100),
+          "a second poll in the same host millisecond is suppressed");
 }
 
 /* Session state may be absolute or reached through a profile context pointer. */
@@ -1741,6 +2329,12 @@ static void test_keys_parse(void)
 
 int main(void)
 {
+    test_default_save_folder();
+    test_save_folder_migration();
+    test_state_save_lock();
+    test_state_snapshot();
+    test_container_restore();
+    test_state_lifecycle();
     test_devices();
     test_dlc_device_rows();
     test_dlc_route_id();
@@ -1758,16 +2352,19 @@ int main(void)
     test_nfcpeer();
     test_link();
     test_link_hub_relay();
+    test_link_auto_join();
     test_link_collision();
     test_link_wire_time();
     test_ir_rx_wire_time();
     test_rtc_buttons();
     test_mem();
+    test_mem_dstram_past_0x84800();
     test_cpu_alu();
     test_cpu_ext();
     test_cpu_xjp_patch_bytes();
     test_cpu_branch_call();
     test_cpu_bad_pc_trap();
+    test_cpu_pc_masks_to_28_bits();
     test_watch_flash();
     test_cmu();
     test_lockstep();

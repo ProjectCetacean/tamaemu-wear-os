@@ -44,6 +44,9 @@ jobs:
       - name: Local device-helper regressions (no device or firmware)
         if: github.event_name != 'workflow_dispatch'
         run: python3 -m unittest discover -s scripts/tests -v 2>&1 | tee helper-test.log
+      - name: Upstream desktop tests (no firmware or SDL)
+        if: github.event_name != 'workflow_dispatch'
+        run: bash scripts/test-upstream-desktop.sh 2>&1 | tee upstream-desktop-test.log
       - name: Native tests (no firmware)
         if: github.event_name != 'workflow_dispatch'
         run: scripts/test-wear-native.sh 2>&1 | tee native-test.log

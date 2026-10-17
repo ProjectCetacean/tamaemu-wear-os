@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real native v3 writer -> production Java Tile reader, with local-only fixtures.
+# Real native v4 writer -> production Java Tile reader, with local-only fixtures.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 if (( $# > 1 )); then echo "Usage: $0 [local-rom-path]" >&2; exit 2; fi

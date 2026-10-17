@@ -16,9 +16,14 @@ public final class PetPreviewStoreTest {
     }
     static byte[] hash(byte[] bytes) throws Exception { return MessageDigest.getInstance("SHA-256").digest(bytes); }
     static byte[] envelope(long generation, long mode, long debt, long schema) throws Exception {
-        byte[] file = new byte[8536509];
+        return envelope(3,generation,mode,debt,schema);
+    }
+    static byte[] envelope(int version,long generation,long mode,long debt,long schema) throws Exception {
+        // v4 adds 2,048 RAM bytes before the unchanged pacing and life trailers.
+        int payload=version==3?8536413:8538461;
+        byte[] file = new byte[96+payload];
         ByteBuffer b=ByteBuffer.wrap(file).order(ByteOrder.LITTLE_ENDIAN);
-        b.put("TAMAWEAR".getBytes("US-ASCII")).putLong(3).putLong(8536413);
+        b.put("TAMAWEAR".getBytes("US-ASCII")).putLong(version).putLong(payload);
         file[88]='i';file[89]='d';file[90]='l';
         b.position(file.length-64); b.putLong(schema).putLong(1800000000000L).putLong(1000).putLong(4)
             .putLong(debt).putLong(mode).putLong(generation).putLong(0);
@@ -28,6 +33,45 @@ public final class PetPreviewStoreTest {
     static PetPreviewSnapshot snapshot(byte[] file, long generation, PetPreviewSnapshot.Mode mode, boolean paused, long debt, int quality, int color) {
         int[] pixels=new int[128*128]; Arrays.fill(pixels,color);
         return new PetPreviewSnapshot(Arrays.copyOfRange(file,56,88),generation,1800000000000L,mode,paused,debt,quality,pixels);
+    }
+    static void rejectsSave(File target,byte[] bytes,String message) throws Exception {
+        Files.write(target.toPath(),bytes);
+        try {PetPreviewStore.readCommittedReceipt(target);throw new AssertionError(message);}
+        catch(IOException expected){checks++;}
+    }
+    static void checkV4Receipt(File dir) throws Exception {
+        File target=new File(dir,"pet.state");
+        byte[] save=envelope(4,29,1,876543210,1);
+        Files.write(target.toPath(),save);
+        PetPreviewStore.CommittedReceipt receipt=PetPreviewStore.readCommittedReceipt(target);
+        check(receipt!=null && receipt.wallUtcMillis==1800000000000L && receipt.elapsedRealtimeMillis==1000 &&
+            receipt.bootCount==4 && receipt.generation==29 && receipt.debtMillis==876543210 &&
+            receipt.mode==PetPreviewSnapshot.Mode.PROTECTED && receipt.clockQuality==0,
+            "v4 reads the clock receipt after expanded RAM without shifting its meaning");
+        check(Arrays.equals(receipt.payloadDigest(),Arrays.copyOfRange(save,56,88)),"v4 identity authenticates the full new payload");
+        PetPreviewStore store=new PetPreviewStore(dir);
+        store.publish(snapshot(save,29,PetPreviewSnapshot.Mode.PROTECTED,true,876543210,0,0xff123456));
+        check(store.readVerified().state==PetPreviewStore.State.VALID,"v4 committed identity verifies cached preview");
+        byte[] corrupt=save.clone();corrupt[8536509]^=1;
+        rejectsSave(target,corrupt,"v4 bytes beyond the old envelope must be authenticated");
+        rejectsSave(target,Arrays.copyOf(save,save.length-1),"truncated v4 save accepted");
+        rejectsSave(target,Arrays.copyOf(save,save.length+1),"trailing v4 save accepted");
+        for(long[] header:new long[][]{{4,8536413},{3,8538461},{5,8538461},{4,Long.MAX_VALUE},{4,-1}}) {
+            byte[] invalid=save.clone();ByteBuffer.wrap(invalid).order(ByteOrder.LITTLE_ENDIAN).putLong(8,header[0]).putLong(16,header[1]);
+            rejectsSave(target,invalid,"mismatched v4 version/length accepted");
+        }
+        for(long[] field:new long[][]{{0,2},{1,0},{2,-1},{3,-1},{4,-1},{5,2},{6,0},{7,2}}) {
+            byte[] invalid=save.clone();ByteBuffer.wrap(invalid).order(ByteOrder.LITTLE_ENDIAN).putLong(invalid.length-64+(int)field[0]*8,field[1]);
+            System.arraycopy(hash(Arrays.copyOfRange(invalid,96,invalid.length)),0,invalid,56,32);
+            rejectsSave(target,invalid,"invalid authenticated v4 clock receipt accepted, slot="+field[0]);
+        }
+        byte[] zero=save.clone();Arrays.fill(zero,zero.length-64,zero.length,(byte)0);
+        System.arraycopy(hash(Arrays.copyOfRange(zero,96,zero.length)),0,zero,56,32);
+        Files.write(target.toPath(),zero);
+        check(PetPreviewStore.readCommittedReceipt(target)==null,"uninitialized v4 receipt remains neutral");
+        byte[] malformed=zero.clone();ByteBuffer.wrap(malformed).order(ByteOrder.LITTLE_ENDIAN).putLong(malformed.length-56,1);
+        System.arraycopy(hash(Arrays.copyOfRange(malformed,96,malformed.length)),0,malformed,56,32);
+        rejectsSave(target,malformed,"partially initialized v4 clock accepted");
     }
     public static void main(String[] args) throws Exception {
         File dir=Files.createTempDirectory("tile-synthetic-").toFile();
@@ -86,7 +130,9 @@ public final class PetPreviewStoreTest {
                 try{PetPreviewStore.readCommittedReceipt(new File(dir,"pet.state"));throw new AssertionError("unsigned receipt slot accepted: "+slot);}catch(IOException expected){checks++;}
             }
             for(int version:new int[]{1,2}) {
-                byte[] legacy=Arrays.copyOf(save,version==1?8536437:8536445);ByteBuffer.wrap(legacy).order(ByteOrder.LITTLE_ENDIAN).putLong(8,version);
+                byte[] legacy=Arrays.copyOf(save,version==1?8536437:8536445);
+                ByteBuffer.wrap(legacy).order(ByteOrder.LITTLE_ENDIAN).putLong(8,version).putLong(16,legacy.length-96);
+                System.arraycopy(hash(Arrays.copyOfRange(legacy,96,legacy.length)),0,legacy,56,32);
                 Files.write(new File(dir,"pet.state").toPath(),legacy);
                 check(PetPreviewStore.readCommittedReceipt(new File(dir,"pet.state"))==null,"legacy save cannot invent active receipt");
             }
@@ -111,6 +157,7 @@ public final class PetPreviewStoreTest {
             check(store.readPinnedImage(n)==null,"corrupt pinned resource never returned under old version");
             for(int i=0;i<7;i++)store.pinImage(snapshot(save,7,PetPreviewSnapshot.Mode.NORMAL,false,0,0,0xff000000+i));
             check(dir.listFiles((d,name)->name.startsWith("tile-image-")).length<=4,"resource pin storage is bounded after repeated saves");
+            checkV4Receipt(dir);
             System.out.println("PetPreviewStoreTest: "+checks+" checks passed");
         } finally { for(File f:dir.listFiles()) Files.deleteIfExists(f.toPath());Files.deleteIfExists(dir.toPath()); }
     }

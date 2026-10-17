@@ -145,13 +145,32 @@ static void peripheral_continuation(const char *rom,const char *save,const char 
         wear_close(a);replay_reference_close(b);
     }
 }
+/* Downloaded programs jump through tagged 32-bit values on a 28-bit bus.
+ * Check execution and trace routing, including the formerly unmapped upper RAM. */
+static void tagged_pc_routing(const char *rom,const char *save) {
+    WearBackend *b=wear_open(rom,save,error);CHECK(b!=NULL,"tagged PC fixture opens");Emu *e=(Emu *)wear_state(b);
+    const uint32_t targets[]={e->dev.rom_base+0x1800,e->dev.a0ram_base+0x1800,e->dev.ivram_base+0x100,e->dev.dstram_base+0x800,e->dev.dstram_base+0xffc};
+    uint32_t source=e->dev.a0ram_base+0x1000;mem_write16(e,source,0x0680); /* jp r0 */
+    for(size_t n=0;n<sizeof targets/sizeof *targets;n++) {
+        uint32_t physical=targets[n];
+        if(n==0) {e->rom[physical-e->dev.rom_base]=0x11;e->rom[physical-e->dev.rom_base+1]=0x6c;}
+        else mem_write16(e,physical,0x6c11); /* ld.w r1,1 */
+        for(unsigned tag=0;tag<16;tag++) {
+            e->pc=source;e->r[0]=physical|(tag<<28);e->r[1]=0;e->halted=false;
+            cpu_step(e);CHECK(e->pc==(physical|(tag<<28))&&!e->stopped,"jump preserves target until next bus fetch");
+            cpu_step(e);CHECK(!e->stopped&&e->r[1]==1&&e->pc==physical+2,"all high tags route to mapped 28-bit program");
+            CHECK(e->trace_ring[(e->trace_ring_pos-1)&TRACE_RING_M]==physical,"instruction trace records actual bus address");
+        }
+    }
+    puts("Tagged PC routing passed: 16 high tags across ROM and all RAM maps, including upper download RAM");wear_close(b);
+}
 int main(int argc,char **argv) {
     char directory[]="/tmp/tamaemu-replay-test-XXXXXX";CHECK(mkdtemp(directory)!=NULL,"owned test directory");
     char rom[256],save[256],reference[256];
     snprintf(rom,sizeof rom,"%s/synthetic.rom",directory);snprintf(save,sizeof save,"%s/new.state",directory);
     snprintf(reference,sizeof reference,"%s/original.state",directory);fixture(rom);
     if(argc==2 && !strcmp(argv[1],"--dispatch")) dispatch_bound(rom,save,reference);
-    else {backend_equivalence(rom,save,reference);work_limit(rom,save,reference);peripheral_continuation(rom,save,reference);}
+    else {tagged_pc_routing(rom,save);backend_equivalence(rom,save,reference);work_limit(rom,save,reference);peripheral_continuation(rom,save,reference);}
     CHECK(unlink(rom)==0 && rmdir(directory)==0,"owned fixtures removed");
     printf("Replay checks passed: %" PRIu64 "\n",checks);return 0;
 }

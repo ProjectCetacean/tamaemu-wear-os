@@ -1,5 +1,6 @@
 """CLI regressions: each fixture changes a public documentation boundary."""
 import pathlib
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,24 @@ class PublicDocsTests(unittest.TestCase):
         with (self.root / 'packaging/README.txt').open('a') as output:
             output.write('\nA robust port.\n')
         self.assert_rejected('filler')
+
+    def test_synced_upstream_packaging_exemption_uses_verified_bytes(self):
+        data = (SCRIPT.parents[1] / 'packaging/README.txt').read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(),
+                         'd71c092a6455df26347b3f1d087b4aac6cf16c7c5a091d1bceca9c2efb4372ee')
+        self.write('packaging/README.txt', data.decode('utf-8'))
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_synced_upstream_packaging_exemption_is_path_specific(self):
+        data = (SCRIPT.parents[1] / 'packaging/README.txt').read_text(encoding='utf-8')
+        self.write('docs/desktop-packaging.md', data)
+        self.assert_rejected('em-dash')
+
+    def test_synced_upstream_packaging_mutation_loses_exemption(self):
+        data = (SCRIPT.parents[1] / 'packaging/README.txt').read_text(encoding='utf-8')
+        self.write('packaging/README.txt', '\n' + data)
+        self.assert_rejected('em-dash')
 
     def test_missing_reference_link_fails(self):
         self.write('README.md', '# Guide\n\n[guide][missing]\n')

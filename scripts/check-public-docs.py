@@ -15,8 +15,12 @@ REQUIRED = ('README.md', 'CONTRIBUTING.md', 'THIRD_PARTY_NOTICES.md',
 # Exact inherited desktop documents: edits lose the prose exemption. Links and
 # UTF-8/path checks still apply. License texts are outside Markdown discovery.
 UPSTREAM = {
-    'docs/device-map.md': '824233ebeff4167bad778c51d60ecfbbd68fe5ce25d828baeef9741f6f37cdc0',
-    'packaging/README.txt': '17aa6e37a2af3f9f74172dbb4795ffb1ba5e2fdd6ab6f13fe5c3d3822ab579e3',
+    'docs/device-map.md': frozenset({'824233ebeff4167bad778c51d60ecfbbd68fe5ce25d828baeef9741f6f37cdc0'}),
+    'packaging/README.txt': frozenset({
+        '17aa6e37a2af3f9f74172dbb4795ffb1ba5e2fdd6ab6f13fe5c3d3822ab579e3',
+        # Verified upstream 79e19b6, Git blob 946ec15990ff6e35d5282d03c0546193330b38a7.
+        'd71c092a6455df26347b3f1d087b4aac6cf16c7c5a091d1bceca9c2efb4372ee',
+    }),
 }
 WORDS = ('delve landscape evolving insight nuanced paradigm comprehensive framework '
          'facet dynamic intricacies holistic iterative synergy confluence pivotal nuance '
@@ -152,7 +156,7 @@ def check(root, names):
                         raise ValueError('anchor: missing heading ' + parsed.fragment)
             except (OSError, ValueError) as error:
                 fail(name, 'link', f'line {visible.count(chr(10), 0, position) + 1}: {error}')
-        if hashlib.sha256(data).hexdigest() == UPSTREAM.get(name):
+        if hashlib.sha256(data).hexdigest() in UPSTREAM.get(name, ()):
             continue
         prose = INLINE_CODE.sub('', visible)
         prose = REF.sub('', prose)

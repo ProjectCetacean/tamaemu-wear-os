@@ -4,7 +4,7 @@ A Wear OS port of [maragotchi's Tamaemu](https://github.com/maragotchi/tamaemu),
 
 Supported firmware: Tamagotchi iD L. The watch app requires Android API 26 or later and includes ARM32, ARM64 and x86_64 libraries. Other models and the Windows emulator's connection play are not supported by this port.
 
-Version `0.2.0-wear.9` is unreleased.
+Version `0.2.0-wear.10` is unreleased.
 
 ## Firmware
 
@@ -32,7 +32,7 @@ Sound plays in the foreground only. Rapid-press sound lag remains unresolved. Th
 
 See the [Wear OS guide](docs/WEAR_OS.md#build-prerequisites) for build tools, checks, signing and installation, [verification](docs/VERIFICATION.md) for test coverage and limits, and [release notes](docs/RELEASE_NOTES.md) for current changes. Contributions are covered in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The inherited [device map](docs/device-map.md) and [Windows packaging notes](packaging/README.txt) describe the upstream desktop emulator.
+The inherited [device map](docs/device-map.md) and [Windows packaging notes](packaging/README.txt) describe the upstream desktop emulator. This fork includes upstream changes through `79e19b6`, including consolidated desktop `.tamasave` containers and launcher routing for downloaded saves. Wear OS continues to use its own private save format; desktop cross-save import and export are not available in the watch app.
 
 ## License
 
