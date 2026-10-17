@@ -63,6 +63,10 @@ Review the exact source commit, its outgoing history and each artifact intended 
 
 ## Watch testing
 
+Wear 10 at [source commit `1ad4b62`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/1ad4b62c7579d1fdd6b89c5131ac0900e46b8f2a) was installed with the existing signer, with installed bytes matching the signed artifact. One existing iD L clock-setting checkpoint migrated from version 3 to version 4 with a valid payload checksum. Normal mode was preserved, checkpoint generations advanced, and cold process reopen and resaving succeeded. The foreground marker was absent after the lifecycle save completed.
+
+This check used the Debug production package. It does not establish migration for every firmware or checkpoint; versions 1 and 2 have synthetic coverage only. Hardware Tile behavior, buttons and speaker latency were outside this check. The [Android CI run for that source](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39001537544) passed 279 Android test cases with no failures, errors or skips.
+
 Rapid-press sound lag and continuity remain unresolved. Acoustic delay, sustained gameplay, battery consumption, long-gap replay, injected save-I/O failure recovery, TalkBack, large fonts and appearance across different watches still need testing.
 
 Updates need save-continuity and migration checks with the intended app and signer. Keep firmware, saves, keys and raw captures local; see [CONTRIBUTING.md](../CONTRIBUTING.md) for reporting problems.

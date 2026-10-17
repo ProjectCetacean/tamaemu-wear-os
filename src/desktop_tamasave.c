@@ -1,3 +1,4 @@
+/* Desktop import preservation changes: October 2026. */
 #include "tamasave.h"
 #include "desktop_tamasave.h"
 #include "emu.h"
@@ -8,11 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#include <io.h>
 #else
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -60,30 +63,158 @@ static int read_file(const char *path, uint8_t **data, size_t *len,
     return 1;
 }
 
+/* Exclusive staging never truncates or removes an artifact left by another
+ * attempt. Only callers that successfully create a stage own its cleanup. */
+static FILE *create_stage(const char *path, char *why, size_t whysz)
+{
+#ifdef _WIN32
+    int fd = _open(path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+                    _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+#endif
+    FILE *f;
+    if (fd < 0) {
+        desktop_why(why, whysz, "cannot create %s: %s", path, strerror(errno)); return NULL;
+    }
+#ifdef _WIN32
+    f = _fdopen(fd, "wb");
+#else
+    f = fdopen(fd, "wb");
+#endif
+    if (!f) {
+#ifdef _WIN32
+        _close(fd);
+#else
+        close(fd);
+#endif
+        remove(path);
+        desktop_why(why, whysz, "cannot open staging stream %s", path);
+    }
+    return f;
+}
+
+static int write_stage(const char *path, const uint8_t *data, size_t len,
+                       char *why, size_t whysz)
+{
+    FILE *f = create_stage(path, why, whysz);
+    int written, closed;
+    if (!f) return 0;
+    written = !len || fwrite(data, 1, len, f) == len;
+    closed = fclose(f) == 0; /* Close even when fwrite failed. */
+    if (!written || !closed) {
+        remove(path); desktop_why(why, whysz, "cannot write %s", path); return 0;
+    }
+    return 1;
+}
+
+static int replace_file(const char *stage, const char *path,
+                        char *why, size_t whysz)
+{
+#ifdef _WIN32
+    if (!MoveFileExA(stage, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        desktop_why(why, whysz, "cannot replace %s", path); return 0;
+    }
+#else
+    if (rename(stage, path) != 0) {
+        desktop_why(why, whysz, "cannot replace %s: %s", path, strerror(errno)); return 0;
+    }
+#endif
+    return 1;
+}
+
 static int write_atomic(const char *path, const uint8_t *data, size_t len,
                         char *why, size_t whysz)
 {
     char tmp[1200];
     FILE *f;
-    int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    if (n < 0 || (size_t)n >= sizeof tmp) {
-        desktop_why(why, whysz, "save path is too long"); return 0;
-    }
+    int written, closed;
+    if (!bundle_path(tmp, sizeof tmp, path, ".tmp", why, whysz)) return 0;
+    /* Normal save/export owns this stage under the existing owner protocol.
+     * Recover a leftover stage after interruption, as the original writer did.
+     * Import pairs use the separate exclusive write_stage path above. */
     f = fopen(tmp, "wb");
-    if (!f) { desktop_why(why, whysz, "cannot create %s: %s", tmp, strerror(errno)); return 0; }
-    if ((len && fwrite(data, 1, len, f) != len) || fclose(f) != 0) {
+    if (!f) {
+        desktop_why(why, whysz, "cannot create %s: %s", tmp, strerror(errno)); return 0;
+    }
+    written = !len || fwrite(data, 1, len, f) == len;
+    closed = fclose(f) == 0;
+    if (!written || !closed) {
         remove(tmp); desktop_why(why, whysz, "cannot write %s", tmp); return 0;
     }
-#ifdef _WIN32
-    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        remove(tmp); desktop_why(why, whysz, "cannot replace %s", path); return 0;
-    }
-#else
-    if (rename(tmp, path) != 0) {
-        remove(tmp); desktop_why(why, whysz, "cannot replace %s: %s", path, strerror(errno)); return 0;
-    }
-#endif
+    if (!replace_file(tmp, path, why, whysz)) { remove(tmp); return 0; }
     return 1;
+}
+
+/* Keep an old flash copy before publishing either staged file. Streaming bounds
+ * memory even if a pre-existing destination has an unexpected file length. */
+static int backup_flash(const char *path, const char *backup, int *exists,
+                        char *why, size_t whysz)
+{
+    FILE *in = fopen(path, "rb"), *out;
+    uint8_t buf[8192];
+    size_t n;
+    int ok = 1;
+    *exists = 0;
+    if (!in) {
+        if (errno == ENOENT) return 1;
+        desktop_why(why, whysz, "cannot read existing flash %s", path); return 0;
+    }
+    out = create_stage(backup, why, whysz);
+    if (!out) { fclose(in); return 0; }
+    while ((n = fread(buf, 1, sizeof buf, in)) != 0)
+        if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
+    if (ferror(in)) ok = 0;
+    if (fclose(in) != 0) ok = 0;
+    if (fclose(out) != 0) ok = 0;
+    if (!ok) {
+        remove(backup); desktop_why(why, whysz, "cannot back up existing flash %s", path); return 0;
+    }
+    *exists = 1;
+    return 1;
+}
+
+/* The normal save lock excludes cooperating writers. Both complete stages and
+ * an old-flash backup precede publication. This is rollback on reported I/O
+ * failure, not an atomic two-file transaction across process/power loss. */
+static int import_pair(const char *savpath, const char *container,
+                       const uint8_t *flash, size_t flash_len,
+                       const uint8_t *wire, size_t wire_len,
+                       char *why, size_t whysz)
+{
+    char flash_stage[1200], container_stage[1200], backup[1200];
+    int staged_flash = 0, staged_container = 0, backed_up = 0;
+    int retain_backup = 0, ok = 0;
+    if (!bundle_path(flash_stage, sizeof flash_stage, savpath, ".tmp", why, whysz) ||
+        !bundle_path(container_stage, sizeof container_stage, container, ".tmp", why, whysz) ||
+        !bundle_path(backup, sizeof backup, savpath, ".import-backup", why, whysz)) return 0;
+    if (!write_stage(flash_stage, flash, flash_len, why, whysz)) goto done;
+    staged_flash = 1;
+    if (!write_stage(container_stage, wire, wire_len, why, whysz)) goto done;
+    staged_container = 1;
+    if (!backup_flash(savpath, backup, &backed_up, why, whysz)) goto done;
+    if (!replace_file(flash_stage, savpath, why, whysz)) goto done;
+    staged_flash = 0;
+    if (!replace_file(container_stage, container, why, whysz)) {
+        char original_error[160];
+        snprintf(original_error, sizeof original_error, "%s", why && whysz ? why : "container replacement failed");
+        if (backed_up) {
+            if (!replace_file(backup, savpath, NULL, 0)) {
+                retain_backup = 1;
+                desktop_why(why, whysz, "rollback failed; original flash retained at %s; %s", backup, original_error);
+            } else backed_up = 0;
+        } else if (remove(savpath) != 0) {
+            desktop_why(why, whysz, "%s; rollback could not remove new flash %s", original_error, savpath);
+        }
+        goto done;
+    }
+    staged_container = 0;
+    ok = 1;
+done:
+    if (staged_flash) remove(flash_stage);
+    if (staged_container) remove(container_stage);
+    if (backed_up && !retain_backup) remove(backup);
+    return ok;
 }
 
 static int verify_container_file(const char *path, char *why, size_t whysz)
@@ -289,10 +420,13 @@ int desktop_import_tamasave(const char *in, const char *savpath,
     uintptr_t lock = 0;
     char container_path[1024];
     int ok = 0;
+    const DeviceProfile *profile;
 
     if (!in || !savpath || !device || !*device || !flash_len) {
         desktop_why(why, whysz, "invalid import arguments"); return 0;
     }
+    profile = device_find(device);
+    if (!profile) { desktop_why(why, whysz, "unknown import device %s", device); return 0; }
     /* Take the normal per-save lock before reading or replacing any bundle file. */
     if (!state_sav_lock_acquire(savpath, &lock, why, whysz)) return 0;
     if (!read_file(in, &wire, &wire_len, why, whysz) ||
@@ -303,6 +437,9 @@ int desktop_import_tamasave(const char *in, const char *savpath,
     }
     if (save.sav_len != flash_len) {
         desktop_why(why, whysz, "container flash size does not match selected device"); goto done;
+    }
+    if (save.ram_len != profile->a0ram_size) {
+        desktop_why(why, whysz, "container RAM size does not match selected device"); goto done;
     }
     {
         int had_metadata = read_metadata(savpath, &current, why, whysz);
@@ -315,8 +452,7 @@ int desktop_import_tamasave(const char *in, const char *savpath,
         }
     }
     if (!bundle_path(container_path, sizeof container_path, savpath, ".tamasave", why, whysz) ||
-        !write_atomic(savpath, save.sav, save.sav_len, why, whysz) ||
-        !write_atomic(container_path, wire, wire_len, why, whysz))
+        !import_pair(savpath, container_path, save.sav, save.sav_len, wire, wire_len, why, whysz))
         goto done;
     desktop_why(why, whysz, "imported");
     ok = 1;

@@ -3,7 +3,7 @@
 ## 0.2.0-wear.10, unreleased
 
 - Sync upstream through `79e19b6`, including desktop save containers, downloaded-save routing and core corrections.
-- Wear saves now use checkpoint version 4 for the updated core's expanded RAM. Earlier Wear checkpoints can be loaded and upgraded; real-watch migration still needs testing. Preserve the pre-update backup because earlier Wear builds cannot read version 4.
+- Wear saves now use checkpoint version 4 for the updated core's expanded RAM. Version 3 migration, cold process reopen and resaving were verified on one existing watch checkpoint; versions 1 and 2 have synthetic coverage. Preserve the pre-update backup because earlier Wear builds cannot read version 4.
 - Desktop `.tamasave` import and export remain unavailable on Wear OS. The watch app retains its separate save format.
 
 ## 0.2.0-wear.9, unreleased

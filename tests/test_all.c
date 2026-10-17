@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /* POSIX build portability changes: October 2026. */
 #include "../src/emu.h"
 #include "../src/desktop_tamasave.h"
@@ -9,6 +12,7 @@
 #include <stddef.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <errno.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <direct.h>
@@ -18,8 +22,58 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <dlfcn.h>
 #define TEST_MKDIR(p) mkdir(p, 0700)
 #define TEST_RMDIR(p) rmdir(p)
+#endif
+
+#ifndef _WIN32
+/* Fault only exact synthetic destination paths; normal calls retain renameat
+ * semantics. This also exercises rollback errors without disk/system changes. */
+static const char *import_stream_fail_path;
+static int import_stream_fail_close, import_stream_failure_seen;
+static int import_fail_stream(FILE *stream, int closing)
+{
+    struct stat path_stat, stream_stat;
+    if (!import_stream_fail_path || closing != import_stream_fail_close ||
+        stat(import_stream_fail_path, &path_stat) || fstat(fileno(stream), &stream_stat) ||
+        path_stat.st_dev != stream_stat.st_dev || path_stat.st_ino != stream_stat.st_ino) return 0;
+    import_stream_fail_path = NULL;
+    import_stream_failure_seen++;
+    errno = ENOSPC;
+    return 1;
+}
+size_t fwrite(const void *bytes, size_t size, size_t count, FILE *stream)
+{
+    static size_t (*normal_write)(const void *, size_t, size_t, FILE *);
+    if (!normal_write) normal_write = (size_t (*)(const void *, size_t, size_t, FILE *))dlsym(RTLD_NEXT, "fwrite");
+    if (!normal_write) abort();
+    if (import_fail_stream(stream, 0)) return 0;
+    return normal_write(bytes, size, count, stream);
+}
+int fclose(FILE *stream)
+{
+    static int (*normal_close)(FILE *);
+    int fail, result;
+    if (!normal_close) normal_close = (int (*)(FILE *))dlsym(RTLD_NEXT, "fclose");
+    if (!normal_close) abort();
+    fail = import_fail_stream(stream, 1);
+    result = normal_close(stream);
+    return fail ? EOF : result;
+}
+static const char *import_rename_fail[2];
+static unsigned import_rename_next;
+int rename(const char *from, const char *to)
+{
+    if (import_rename_next < 2 && import_rename_fail[import_rename_next] &&
+        !strcmp(to, import_rename_fail[import_rename_next])) {
+        import_rename_next++;
+        errno = EACCES;
+        return -1;
+    }
+    return renameat(AT_FDCWD, from, AT_FDCWD, to);
+}
 #endif
 
 static int fails;
@@ -316,6 +370,213 @@ static void test_state_snapshot(void)
     free(saved.rom);
     remove(path);
     remove(statepath);
+}
+
+static int import_write_bytes(const char *path, const uint8_t *bytes, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    int wrote = fwrite(bytes, 1, n, f) == n;
+    return fclose(f) == 0 && wrote;
+}
+
+static int import_file_equals(const char *path, const uint8_t *bytes, size_t n)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t buf[8192];
+    int same = f != NULL;
+    if (!f) return 0;
+    for (size_t at = 0; same && at < n;) {
+        size_t part = n - at < sizeof buf ? n - at : sizeof buf;
+        same = fread(buf, 1, part, f) == part && !memcmp(buf, bytes + at, part);
+        at += part;
+    }
+    same = same && fgetc(f) == EOF && !ferror(f);
+    return fclose(f) == 0 && same;
+}
+
+static int import_file_absent(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) != 0 && errno == ENOENT;
+}
+
+static uint8_t *import_wire(const DeviceProfile *dev, const uint8_t *flash,
+                            uint8_t *ram, size_t ram_len, uint64_t revision,
+                            size_t *n)
+{
+    TamaSave save = {0};
+    uint8_t *wire = NULL;
+    char why[128];
+    memset(save.lineage, 0x41, sizeof save.lineage);
+    save.revision = revision;
+    save.saved_utc_ms = 1700000000123;
+    strcpy(save.device, dev->name);
+    save.sav = (uint8_t *)flash; save.sav_len = dev->rom_size;
+    save.ram = ram; save.ram_len = ram_len;
+    CHECK(tamasave_encode(&save, &wire, n, why, sizeof why),
+          "synthetic import container encodes: %s", why);
+    return wire;
+}
+
+/* Invalid portable RAM must be rejected before either destination is touched.
+ * Exercise two distinct profiles; incoming lengths are CRC-valid containers. */
+static void test_import_ram_validation(void)
+{
+    const char *flash_path = "import_ram.sav", *container = "import_ram.sav.tamasave";
+    const char *incoming = "import_ram.in";
+    const char *names[] = {"idl", "plus-color"};
+    char why[256];
+    for (size_t profile = 0; profile < sizeof names / sizeof names[0]; profile++) {
+        const DeviceProfile *dev = device_find(names[profile]);
+        CHECK(dev != NULL, "import RAM profile exists");
+        if (!dev) continue;
+        uint8_t *old = malloc(dev->rom_size), *next = malloc(dev->rom_size);
+        uint8_t *ram = calloc(1, dev->a0ram_size + 1);
+        CHECK(old && next && ram, "synthetic import RAM allocations");
+        if (!old || !next || !ram) { free(old); free(next); free(ram); continue; }
+        memset(old, 0x31, dev->rom_size); memset(next, 0x72, dev->rom_size);
+        size_t old_n = 0; uint8_t *old_wire = import_wire(dev, old, ram, dev->a0ram_size, 1, &old_n);
+        if (!old_wire) { free(old); free(next); free(ram); continue; }
+        const size_t invalid[] = {1, dev->a0ram_size - 1, dev->a0ram_size + 1};
+        for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+            size_t new_n = 0; uint8_t *new_wire = import_wire(dev, next, ram, invalid[i], 2, &new_n);
+            CHECK(import_write_bytes(flash_path, old, dev->rom_size) &&
+                  import_write_bytes(container, old_wire, old_n) &&
+                  new_wire && import_write_bytes(incoming, new_wire, new_n), "invalid RAM fixture files");
+            CHECK(!desktop_import_tamasave(incoming, flash_path, dev->name, dev->rom_size, 1, why, sizeof why),
+                  "CRC-valid wrong RAM length rejected for %s: %s", dev->name, why);
+            CHECK(import_file_equals(flash_path, old, dev->rom_size) && import_file_equals(container, old_wire, old_n),
+                  "invalid RAM preserves existing flash/container pair for %s", dev->name);
+            free(new_wire);
+        }
+        CHECK(!desktop_import_tamasave(incoming, flash_path, "unknown-import-device", dev->rom_size, 1, why, sizeof why),
+              "unknown profile rejected before import");
+        free(old_wire); free(old); free(next); free(ram);
+    }
+    remove(incoming); remove(container); remove(flash_path); remove("import_ram.sav.lock");
+}
+
+static void test_import_transaction(void)
+{
+    const DeviceProfile *dev = device_find("plus-color");
+    const char *flash_path = "import_pair.sav", *container = "import_pair.sav.tamasave";
+    const char *incoming = "import_pair.in", *backup = "import_pair.sav.import-backup";
+    const char *stage[] = {"import_pair.sav.tmp", "import_pair.sav.tamasave.tmp"};
+    char why[256];
+    CHECK(dev != NULL, "transaction profile exists"); if (!dev) return;
+    uint8_t *old = malloc(dev->rom_size), *next = malloc(dev->rom_size), *ram = calloc(1, dev->a0ram_size);
+    CHECK(old && next && ram, "transaction allocations");
+    if (!old || !next || !ram) { free(old); free(next); free(ram); return; }
+    memset(old, 0x31, dev->rom_size); memset(next, 0x72, dev->rom_size);
+    size_t old_n = 0, new_n = 0;
+    uint8_t *old_wire = import_wire(dev, old, ram, dev->a0ram_size, 1, &old_n);
+    ram[17] = 0xa6;
+    uint8_t *new_wire = import_wire(dev, next, ram, dev->a0ram_size, 2, &new_n);
+    if (!old_wire || !new_wire) goto done;
+    CHECK(import_write_bytes(incoming, new_wire, new_n), "transaction input written");
+    /* Block either stage, then a pre-existing unrelated stage/backup file.
+     * Existing artifacts must never be truncated or removed by this attempt. */
+    for (int which = 0; which < 4; which++) {
+        CHECK(import_write_bytes(flash_path, old, dev->rom_size) && import_write_bytes(container, old_wire, old_n), "old transaction pair written");
+        const char *blocked = which < 2 ? stage[which] : (which == 2 ? stage[0] : backup);
+        const uint8_t sentinel[] = "unrelated recovery bytes";
+        CHECK(which < 2 ? TEST_MKDIR(blocked) == 0 : import_write_bytes(blocked, sentinel, sizeof sentinel), "blocked stage/backup fixture");
+        CHECK(!desktop_import_tamasave(incoming, flash_path, dev->name, dev->rom_size, 0, why, sizeof why), "blocked preparation fails import: %s", why);
+        CHECK(import_file_equals(flash_path, old, dev->rom_size) && import_file_equals(container, old_wire, old_n), "stage/backup failure preserves old pair");
+        if (which < 2) CHECK(TEST_RMDIR(blocked) == 0, "blocked stage directory preserved");
+        else { CHECK(import_file_equals(blocked, sentinel, sizeof sentinel), "unexpected artifact bytes preserved"); remove(blocked); }
+        CHECK(import_file_absent(stage[0]) && import_file_absent(stage[1]) && import_file_absent(backup), "only attempt-owned staging cleaned");
+    }
+#ifndef _WIN32
+    const char *stream_paths[] = {stage[0], stage[1], backup};
+    for (int closing = 0; closing < 2; closing++) for (size_t which = 0; which < 3; which++) {
+        CHECK(import_write_bytes(flash_path, old, dev->rom_size) && import_write_bytes(container, old_wire, old_n), "old stream-failure pair written");
+        import_stream_fail_path = stream_paths[which]; import_stream_fail_close = closing; import_stream_failure_seen = 0;
+        CHECK(!desktop_import_tamasave(incoming, flash_path, dev->name, dev->rom_size, 0, why, sizeof why), "injected stage/backup write or close fails import: %s", why);
+        CHECK(import_stream_failure_seen == 1, "exact staged write/close failure reached");
+        import_stream_fail_path = NULL;
+        CHECK(import_file_equals(flash_path, old, dev->rom_size) && import_file_equals(container, old_wire, old_n), "failed staged write/close preserves old pair");
+        CHECK(import_file_absent(stage[0]) && import_file_absent(stage[1]) && import_file_absent(backup), "failed write/close cleans only owned artifacts");
+    }
+    for (int which = 0; which < 4; which++) {
+        CHECK(import_write_bytes(flash_path, old, dev->rom_size) && import_write_bytes(container, old_wire, old_n), "old fault pair written");
+        if (which == 2) CHECK(remove(flash_path) == 0, "initial flash absence fixture");
+        import_rename_next = 0;
+        import_rename_fail[0] = which == 0 ? flash_path : container;
+        import_rename_fail[1] = which == 3 ? flash_path : NULL;
+        CHECK(!desktop_import_tamasave(incoming, flash_path, dev->name, dev->rom_size, 0, why, sizeof why), "injected replacement failure reports failure: %s", why);
+        CHECK(import_rename_next == (which == 3 ? 2u : 1u), "targeted publication/rollback fault reached");
+        import_rename_fail[0] = import_rename_fail[1] = NULL;
+        CHECK(import_file_equals(container, old_wire, old_n), "container unchanged on every failed replacement");
+        if (which == 3) {
+            CHECK(import_file_equals(backup, old, dev->rom_size) && strstr(why, backup), "failed rollback retains named recoverable flash backup");
+            CHECK(rename(backup, flash_path) == 0, "test restores retained backup after simulated rollback failure");
+        } else CHECK(which == 2 ? import_file_absent(flash_path) : import_file_equals(flash_path, old, dev->rom_size), "failed replacement restores old flash presence and bytes");
+        CHECK(import_file_absent(stage[0]) && import_file_absent(stage[1]) && import_file_absent(backup), "failed publication staging cleaned");
+    }
+#else
+    fprintf(stderr, "desktop import write/close/rename-fault cases require POSIX interposition; not run on Windows\n");
+#endif
+    CHECK(desktop_import_tamasave(incoming, flash_path, dev->name, dev->rom_size, 0, why, sizeof why), "valid import commits both files: %s", why);
+    CHECK(import_file_equals(flash_path, next, dev->rom_size) && import_file_equals(container, new_wire, new_n), "successful import installs complete matching new pair");
+    CHECK(import_file_absent(stage[0]) && import_file_absent(stage[1]) && import_file_absent(backup), "successful import staging cleaned");
+done:
+    free(old_wire); free(new_wire); free(old); free(next); free(ram);
+    remove(incoming); remove(container); remove(flash_path); remove("import_pair.sav.lock");
+}
+
+/* The normal save owner must recover a stale stage left by interruption.
+ * Import stages remain exclusive and are tested separately above. */
+static void test_normal_stale_stage_recovery(void)
+{
+    const DeviceProfile *dev = device_find("plus-color");
+    const char *savpath = "normal_recovery.sav";
+    const char *container = "normal_recovery.sav.tamasave";
+    const char *stage = "normal_recovery.sav.tamasave.tmp";
+    const char *exported = "normal_recovery_export.tamasave";
+    const char *export_stage = "normal_recovery_export.tamasave.tmp";
+    const uint8_t stale[] = "incomplete stage left by an interrupted normal save";
+    uint8_t *flash = NULL, *ram = NULL, *wire = NULL, *latest = NULL;
+    size_t wire_len = 0, latest_len = 0;
+    char why[256];
+    uintptr_t lock = 0;
+    CHECK(dev != NULL, "normal recovery profile exists"); if (!dev) return;
+    flash = calloc(1, dev->rom_size); ram = calloc(1, dev->a0ram_size);
+    CHECK(flash && ram, "normal recovery allocations"); if (!flash || !ram) goto done;
+    wire = import_wire(dev, flash, ram, dev->a0ram_size, 3, &wire_len);
+    CHECK(wire && import_write_bytes(container, wire, wire_len), "existing normal checkpoint fixture");
+    CHECK(state_sav_lock_acquire(savpath, &lock, why, sizeof why), "normal save owner holds lock: %s", why);
+    if (!wire || !lock) goto done;
+    for (int round = 0; round < 2; round++) {
+        TamaSave decoded = {0};
+        FILE *f;
+        long n = 0;
+        CHECK(import_write_bytes(stage, stale, sizeof stale), "stale normal stage fixture");
+        flash[17] = (uint8_t)(0x71 + round); ram[17] = (uint8_t)(0xa1 + round);
+        CHECK(desktop_write_tamasave(savpath, container, dev->name,
+                                    flash, dev->rom_size, ram, dev->a0ram_size,
+                                    NULL, 0, NULL, why, sizeof why), "normal save recovers stale stage: %s", why);
+        CHECK(import_file_absent(stage), "recovered normal stage consumed");
+        f = fopen(container, "rb");
+        CHECK(f && fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0, "recovered checkpoint readable");
+        free(latest); latest = n > 0 ? malloc((size_t)n) : NULL; latest_len = n > 0 ? (size_t)n : 0;
+        int read_ok = f && latest && fread(latest, 1, latest_len, f) == latest_len;
+        if (f) fclose(f);
+        CHECK(read_ok && tamasave_decode(latest, latest_len, &decoded, why, sizeof why), "recovered checkpoint validates: %s", why);
+        CHECK(decoded.revision == (uint64_t)(4 + round) && !memcmp(decoded.lineage, "AAAAAAAAAAAAAAAA", 16), "normal recovery advances revision and preserves lineage");
+        CHECK(decoded.sav_len == dev->rom_size && decoded.ram_len == dev->a0ram_size &&
+              !memcmp(decoded.sav, flash, dev->rom_size) && !memcmp(decoded.ram, ram, dev->a0ram_size), "recovered normal save contains new flash and RAM");
+        tamasave_free(&decoded);
+    }
+    CHECK(import_write_bytes(export_stage, stale, sizeof stale), "stale export stage fixture");
+    CHECK(desktop_export_tamasave(savpath, exported, dev->name, why, sizeof why), "export recovers stale stage: %s", why);
+    CHECK(latest && import_file_equals(exported, latest, latest_len), "export copies verified checkpoint and exact META revision");
+    CHECK(import_file_absent(export_stage), "recovered export stage consumed");
+done:
+    state_sav_lock_release(&lock);
+    free(latest); free(wire); free(flash); free(ram);
+    remove(stage); remove(export_stage); remove(exported); remove(container); remove(savpath); remove("normal_recovery.sav.lock");
 }
 
 /* The launch path must treat the raw .sav as flash authority: a rejected STAT
@@ -2365,6 +2626,9 @@ int main(void)
     test_state_save_lock();
     test_state_snapshot();
     test_container_restore();
+    test_import_ram_validation();
+    test_import_transaction();
+    test_normal_stale_stage_recovery();
     test_state_lifecycle();
     test_devices();
     test_dlc_device_rows();

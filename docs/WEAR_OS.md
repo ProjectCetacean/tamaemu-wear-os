@@ -131,7 +131,7 @@ python3 scripts/wear-device.py --serial WATCH_SERIAL import-rom /path/to/local-f
 
 Import verifies the complete size and hash locally, refuses an existing firmware target and preserves save state. A failed transfer leaves its target for diagnosis; do not delete it without understanding the failure. Routine updates do not require importing firmware again. Firmware, backups, captures and signing material belong only in local ignored storage.
 
-Launch the app and check display, input, pause/save and cold-reopen continuity. Complete firmware setup choices yourself. Wear 10 reads earlier Wear checkpoint formats and writes version 4, which retains the expanded RAM used by the updated core. Earlier Wear builds cannot read version 4; rollback requires the matching old app and old save with a separate restore plan. Migration with a real watch save still needs device testing. Uninstalling, clearing data or forcing a downgrade can destroy the pet.
+Launch the app and check display, input, pause/save and cold-reopen continuity. Complete firmware setup choices yourself. Wear 10 reads earlier Wear checkpoint formats and writes version 4, which retains the expanded RAM used by the updated core. Earlier Wear builds cannot read version 4; rollback requires the matching old app and old save with a separate restore plan. Version 3 migration and cold process reopen were verified on one existing watch checkpoint; see [verification](VERIFICATION.md#watch-testing) for the test limits. Uninstalling, clearing data or forcing a downgrade can destroy the pet.
 
 ## Troubleshooting
 
