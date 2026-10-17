@@ -126,8 +126,16 @@ def evaluate(data, repo, policy):
     require(isinstance(reviews, dict) and type(count) is int and count >= desired['required_approving_review_count'],
             'branch.require_pull_request')
     bypass = obj(reviews).get('bypass_pull_request_allowances')
-    require(isinstance(bypass, dict) and
-            all(bypass.get(key) == [] for key in ('users', 'teams', 'apps')), 'branch.no_bypass')
+    no_bypass = isinstance(bypass, dict) and all(
+        bypass.get(key) == [] for key in ('users', 'teams', 'apps'))
+    if isinstance(reviews, dict) and 'bypass_pull_request_allowances' not in reviews:
+        # GitHub permits bypass-list actors only for organization repositories.
+        # Accept omission only with verified matching personal-owner evidence.
+        owner = obj(repository.get('owner'))
+        login = owner.get('login')
+        no_bypass = (owner.get('type') == 'User' and isinstance(login, str)
+                     and login.lower() == repo.split('/', 1)[0].lower())
+    require(no_bypass, 'branch.no_bypass')
     require(actions.get('default_workflow_permissions') == policy['actions']['default_workflow_permissions'],
             'actions.read_only')
     require(actions.get('can_approve_pull_request_reviews') is False, 'actions.no_pr_approval')
