@@ -59,7 +59,8 @@ static void persistence(const char *rom,const char *dir,WearBackend *b,const cha
     rejection(rom,bad,save,b,"corrupt payload rejected");
     copy_file(save,bad);CHECK(truncate(bad,80)==0,"truncate header fixture");rejection(rom,bad,save,b,"truncated header rejected");
     copy_file(save,bad);struct stat st;CHECK(stat(bad,&st)==0 && truncate(bad,st.st_size-1)==0,"truncate payload fixture");rejection(rom,bad,save,b,"truncated payload rejected");
-    copy_file(save,bad);fd=open(bad,O_WRONLY);CHECK(fd>=0 && lseek(fd,8,SEEK_SET)==8 && write(fd,"\4",1)==1,"format version fixture");close(fd);rejection(rom,bad,save,b,"incompatible save rejected");
+    copy_file(save,bad);fd=open(bad,O_WRONLY);CHECK(fd>=0 && lseek(fd,8,SEEK_SET)==8 && write(fd,"\5",1)==1,"format version fixture");close(fd);rejection(rom,bad,save,b,"incompatible save rejected");
+    copy_file(save,bad);fd=open(bad,O_WRONLY);CHECK(fd>=0 && lseek(fd,8,SEEK_SET)==8 && write(fd,"\3",1)==1,"expanded payload mislabeled v3 fixture");close(fd);rejection(rom,bad,save,b,"v3 cannot silently accept expanded v4 payload");
     copy_file(save,bad);fd=open(bad,O_WRONLY);CHECK(fd>=0 && lseek(fd,24,SEEK_SET)==24,"ROM identity fixture");
     CHECK(write(fd,"WRONGROM",8)==8,"ROM identity mutation");close(fd);rejection(rom,bad,save,b,"wrong ROM identity rejected");
     char alternate[1024];path(alternate,dir,"alternate.bin");copy_file(rom,alternate);
@@ -111,48 +112,67 @@ static void fixture_scalar(uint8_t **p,const void *src,size_t width) {
     else memcpy(&n,src,8);
     for(size_t i=0;i<width;i++) *(*p)++=(uint8_t)(n>>(8*i));
 }
+/* Counts are frozen from the public Wear9 writer, never current sizeof. */
+static void old_guest(const Emu *e,uint8_t *out) {
+    uint8_t *cursor=out;
+#define FROZEN_FIELD(member,kind,type,count) do {for(size_t j=0;j<count;j++) fixture_scalar(&cursor,((const type *)&e->member)+j,sizeof(type));} while(0);
+#define FROZEN_STRIDED(member,sub,kind,type,count) do {for(size_t j=0;j<count;j++) fixture_scalar(&cursor,&e->member[j].sub,sizeof(type));} while(0);
+#include "test_wear9_state_fields.inc"
+#undef FROZEN_FIELD
+#undef FROZEN_STRIDED
+    CHECK((size_t)(cursor-out)==147733,"frozen Wear9 guest state length");
+    memcpy(cursor,e->rom,8388608);
+}
+static const uint64_t legacy_life[8]={1,1700000000123,3210,9876,5432,1,7,1};
 static void old_fixture(const char *rom,const char *save,const Emu *e,int version,double deadline) {
-    /* Normative guest length from the frozen original field schema. */
-    const size_t guest_n=8536341,n=guest_n+(version==2?8:0);
-    uint8_t *blob=calloc(1,96+n),*cursor=blob+96;CHECK(blob!=NULL,"old writer fixture allocation");
-#define FIELD(member,kind,type) do {for(size_t j=0;j<sizeof(e->member)/sizeof(type);j++) fixture_scalar(&cursor,((const type *)&e->member)+j,sizeof(type));} while(0);
-#define STRIDED(member,sub,kind,type) do {for(size_t j=0;j<sizeof(e->member)/sizeof(e->member[0]);j++) fixture_scalar(&cursor,&e->member[j].sub,sizeof(type));} while(0);
-#include "state_fields.inc"
-#undef FIELD
-#undef STRIDED
-    CHECK((size_t)(cursor-blob)==96+147733,"frozen v1 guest state length");
-    memcpy(cursor,e->rom,8388608);cursor+=8388608;
-    if(version==2) {uint64_t bits;memcpy(&bits,&deadline,8);fixture_u64(cursor,bits);}
+    const size_t guest_n=8536341,n=guest_n+(version>=2?8:0)+(version>=3?64:0);
+    uint8_t *blob=calloc(1,96+n);CHECK(blob!=NULL,"old writer fixture allocation");
+    old_guest(e,blob+96);
+    if(version>=2) {uint64_t bits;memcpy(&bits,&deadline,8);fixture_u64(blob+96+guest_n,bits);}
+    if(version>=3) for(int i=0;i<8;i++) fixture_u64(blob+96+guest_n+8+8*i,legacy_life[i]);
     memcpy(blob,"TAMAWEAR",8);fixture_u64(blob+8,(uint64_t)version);fixture_u64(blob+16,n);
     file_digest(rom,blob+24);wear_sha256(blob+96,n,blob+56);memcpy(blob+88,"idl",3);
     FILE *f=fopen(save,"wb");CHECK(f && fwrite(blob,1,96+n,f)==96+n,"normative old-format fixture written");CHECK(fclose(f)==0,"old writer fixture close");free(blob);
 }
 static void v1_migration(const char *rom,const char *dir,WearBackend *b,const char *save) {
     (void)save;
-    for(int version=1;version<=2;version++) {
-        char legacy[1024];path(legacy,dir,version==1?"legacy-v1.sav":"legacy-v2.sav");
-        double deadline=wear_state(b)->emu_secs-(version==2?0.0001:0);
+    for(int version=1;version<=3;version++) {
+        char legacy[1024],name[32];snprintf(name,sizeof name,"legacy-v%d.sav",version);path(legacy,dir,name);
+        double deadline=wear_state(b)->emu_secs-(version>=2?0.0001:0);
         old_fixture(rom,legacy,wear_state(b),version,deadline);
         FILE *f=fopen(legacy,"rb");CHECK(f && fseek(f,0,SEEK_END)==0,"old fixture read");
-        long length=ftell(f);rewind(f);uint8_t *before=malloc(8536509),*after=malloc(8536509);
-        CHECK(before && after && fread(before,1,(size_t)length,f)==(size_t)length,"old fixture bytes");fclose(f);
-        WearBackend *old=wear_open(rom,legacy,error);CHECK(old!=NULL,"normative v1/v2 opens without reset");
+        long length=ftell(f);rewind(f);uint8_t *before=malloc(8536509),*after=malloc(8538557),*roundtrip=malloc(8536341);
+        CHECK(before && after && roundtrip && fread(before,1,(size_t)length,f)==(size_t)length,"old fixture bytes");fclose(f);
+        WearBackend *old=wear_open(rom,legacy,error);CHECK(old!=NULL,"frozen Wear9 v1/v2/v3 opens without reset");
+        old_guest(wear_state(old),roundtrip);CHECK(!memcmp(before+96,roundtrip,8536341),"every frozen legacy guest/NOR byte retained");
+        for(size_t i=2048;i<4096;i++) CHECK(wear_state(old)->dstram[i]==0,"formerly unmapped upper RAM zero extended");
         uint64_t life[8]={9};CHECK(wear_read_life(old,life),"legacy life read");
-        for(int i=0;i<8;i++) CHECK(life[i]==0,"legacy has no invented life metadata");
+        for(int i=0;i<8;i++) CHECK(life[i]==(version==3?legacy_life[i]:0),"legacy debt clock generation and receipt metadata retained exactly");
         uint8_t receipt[32];CHECK(wear_committed_payload_hash(old,receipt) && !memcmp(receipt,before+56,32),"legacy receipt is actual validated old-format checksum");
-        CHECK(wear_state(old)->cycles==wear_state(b)->cycles && wear_state(old)->emu_secs==wear_state(b)->emu_secs,"old migration retains guest time and cycles");
         CHECK(wear_save(old,error),"old record migrates on explicit save");
-        f=fopen(legacy,"rb");CHECK(f && fread(after,1,8536509,f)==8536509 && fgetc(f)==EOF,"v3 exact full file size 8536509");fclose(f);
-        CHECK(after[8]==3 && !memcmp(before+96,after+96,8536341),"migration preserves every original guest and NOR byte and offset");
+        f=fopen(legacy,"rb");CHECK(f && fread(after,1,8538557,f)==8538557 && fgetc(f)==EOF,"v4 exact full file size 8538557");fclose(f);
+        CHECK(after[8]==4,"legacy migration writes v4");
         uint64_t bits;memcpy(&bits,&deadline,8);uint8_t encoded_deadline[8];fixture_u64(encoded_deadline,bits);
-        CHECK(!memcmp(after+96+8536341,encoded_deadline,8),"old pacing deadline retained or v1 anchored exactly at guest time");
-        for(int i=0;i<64;i++) CHECK(after[8536509-64+i]==0,"migration writes uninitialized host metadata only");
-        CHECK(wear_committed_payload_hash(old,receipt) && !memcmp(receipt,after+56,32),"migration refreshes exact v3 commit receipt");
-        WearBackend *reopened=wear_open(rom,legacy,error);CHECK(reopened!=NULL,"migrated v3 reopens");equal_state(old,reopened,"migrated full state and deadline persist");
+        CHECK(!memcmp(after+96+8538389,encoded_deadline,8),"old pacing deadline retained or v1 anchored exactly at guest time");
+        for(int i=0;i<8;i++) {uint8_t expected[8];fixture_u64(expected,version==3?legacy_life[i]:0);CHECK(!memcmp(after+8538493+8*i,expected,8),"migration retains every host metadata slot");}
+        CHECK(wear_committed_payload_hash(old,receipt) && !memcmp(receipt,after+56,32),"migration refreshes exact v4 commit receipt");
+        WearBackend *reopened=wear_open(rom,legacy,error);CHECK(reopened!=NULL,"migrated v4 reopens");equal_state(old,reopened,"migrated full state and deadline persist");
+        old_guest(wear_state(reopened),roundtrip);CHECK(!memcmp(before+96,roundtrip,8536341),"reopened migration preserves every frozen legacy field and NOR byte");
         CHECK(wear_advance(old,1,frame,PANEL_W*PANEL_H,error) && wear_advance(reopened,1,other,PANEL_W*PANEL_H,error),"migrated continuation advances");
         equal_state(old,reopened,"migrated deterministic continuation");CHECK(!memcmp(frame,other,sizeof frame),"migrated continued frames identical");
-        wear_close(old);wear_close(reopened);free(before);free(after);
+        wear_close(old);wear_close(reopened);free(before);free(after);free(roundtrip);
     }
+}
+static void downloaded_ram(const char *rom,const char *dir) {
+    char save[1024];path(save,dir,"downloaded-ram.sav");WearBackend *b=wear_open(rom,save,error);CHECK(b!=NULL,"expanded RAM fixture opens");
+    Emu *e=(Emu *)wear_state(b);CHECK(e->dev.dstram_size==4096,"upstream iD L full download RAM map retained");
+    e->halted=e->halt_hard=true;e->cmu.mclk_hz=16384;
+    for(unsigned i=2048;i<4096;i++) mem_write8(e,e->dev.dstram_base+i,(uint8_t)(i*37+11));
+    for(unsigned i=2048;i<4096;i++) CHECK(mem_read8(e,e->dev.dstram_base+i)==(uint8_t)(i*37+11),"entire upper download RAM mapped independently");
+    CHECK(wear_save(b,error),"upper download RAM checkpoints");WearBackend *c=wear_open(rom,save,error);CHECK(c!=NULL,"upper download RAM reopens");equal_state(b,c,"all expanded RAM included in durable canonical state");
+    for(unsigned i=2048;i<4096;i++) CHECK(mem_read8((Emu *)wear_state(c),e->dev.dstram_base+i)==(uint8_t)(i*37+11),"every upper download byte survives reopen");
+    CHECK(wear_advance_headless(b,17,error)&&wear_advance_headless(c,17,error),"expanded RAM continuation advances");equal_state(b,c,"expanded RAM replay continuation matches");
+    v1_migration(rom,dir,b,save);wear_close(b);wear_close(c);
 }
 /* Catches masking retained GRAM with firmware sleep flags in foreground UI.
  * Rendering must not wake the guest or turn this into a persisted preference. */
@@ -297,7 +317,7 @@ static void life_metadata(const char *rom,const char *dir) {
     CHECK(wear_advance_headless(b,17,error),"nonzero fractional deadline before life mutation");
     CHECK(wear_save(b,error),"initial life checkpoint");
     FILE *f=fopen(save,"rb");CHECK(f && fseek(f,56,SEEK_SET)==0 && fread(prior,1,32,f)==32,"read committed header hash");
-    uint8_t *prefix=malloc(8536349);CHECK(prefix && fseek(f,96,SEEK_SET)==0 && fread(prefix,1,8536349,f)==8536349,"original guest NOR and pacing prefix");fclose(f);wear_sha256(prefix,8536349,guest_hash);free(prefix);
+    uint8_t *prefix=malloc(8538397);CHECK(prefix && fseek(f,96,SEEK_SET)==0 && fread(prefix,1,8538397,f)==8538397,"original guest NOR and pacing prefix");fclose(f);wear_sha256(prefix,8538397,guest_hash);free(prefix);
     CHECK(wear_committed_payload_hash(b,receipt) && !memcmp(receipt,prior,32),"receipt matches exact committed payload header");
     receipt[0]^=1;CHECK(wear_committed_payload_hash(b,receipt) && !memcmp(receipt,prior,32),"receipt copy cannot mutate cached commit");
     const Emu *e=wear_state(b);Emu *guest=malloc(sizeof *guest);CHECK(guest!=NULL,"guest comparison allocation");memcpy(guest,e,sizeof *guest);
@@ -307,7 +327,7 @@ static void life_metadata(const char *rom,const char *dir) {
     out[1]=100;CHECK(wear_read_life(b,out) && out[1]==1,"read returns detached copy");
     CHECK(valid[1]==1 && valid[4]==INT64_MAX,"input source array unchanged");
     CHECK(wear_committed_payload_hash(b,receipt) && !memcmp(receipt,prior,32),"working candidate never replaces committed receipt");
-    wear_state_digest(b,digest);CHECK(memcmp(digest,prior,32)!=0,"full v3 digest includes working life trailer");
+    wear_state_digest(b,digest);CHECK(memcmp(digest,prior,32)!=0,"full v4 digest includes working life trailer");
     for(int slot=0;slot<8;slot++) {
         uint64_t invalid[8];memcpy(invalid,valid,sizeof invalid);invalid[slot]=UINT64_MAX;
         CHECK(!wear_write_life(b,invalid,error),"every unsigned slot rejects values above INT64_MAX");
@@ -321,29 +341,29 @@ static void life_metadata(const char *rom,const char *dir) {
     for(int slot=1;slot<8;slot++) {uint64_t nonzero[8]={0};nonzero[slot]=1;CHECK(!wear_write_life(b,nonzero,error),"schema zero rejects each nonzero slot");}
     CHECK(wear_write_life(b,valid,error),"restore initialized candidate");
     CHECK(wear_save(b,error),"candidate life checkpoint saves");
-    f=fopen(save,"rb");CHECK(f && fseek(f,0,SEEK_END)==0 && ftell(f)==8536509,"v3 file size");rewind(f);
-    uint8_t *blob=malloc(8536509);CHECK(blob && fread(blob,1,8536509,f)==8536509,"v3 checkpoint bytes");fclose(f);
-    for(int slot=0;slot<8;slot++) {uint8_t expected[8];fixture_u64(expected,valid[slot]);CHECK(!memcmp(blob+8536445+8*slot,expected,8),"stable eight-slot little-endian ABI and order");}
-    wear_sha256(blob+96,8536349,after);CHECK(!memcmp(after,guest_hash,32),"life edits preserve every guest NOR and nonzero deadline byte");
-    wear_sha256(blob+96,8536413,after);CHECK(!memcmp(after,blob+56,32),"entire v3 payload covered by header checksum");
+    f=fopen(save,"rb");CHECK(f && fseek(f,0,SEEK_END)==0 && ftell(f)==8538557,"v4 file size");rewind(f);
+    uint8_t *blob=malloc(8538557);CHECK(blob && fread(blob,1,8538557,f)==8538557,"v4 checkpoint bytes");fclose(f);
+    for(int slot=0;slot<8;slot++) {uint8_t expected[8];fixture_u64(expected,valid[slot]);CHECK(!memcmp(blob+8538493+8*slot,expected,8),"stable eight-slot little-endian ABI and order");}
+    wear_sha256(blob+96,8538397,after);CHECK(!memcmp(after,guest_hash,32),"life edits preserve every guest NOR and nonzero deadline byte");
+    wear_sha256(blob+96,8538461,after);CHECK(!memcmp(after,blob+56,32),"entire v4 payload covered by header checksum");
     CHECK(wear_committed_payload_hash(b,receipt) && !memcmp(receipt,after,32),"successful receipt updated exactly");
     for(int slot=0;slot<8;slot++) {
-        uint8_t *field=blob+8536509-64+slot*8;uint64_t saved=valid[slot];
-        fixture_u64(field,UINT64_MAX);wear_sha256(blob+96,8536413,blob+56);
-        f=fopen(bad,"wb");CHECK(f && fwrite(blob,1,8536509,f)==8536509,"checksummed invalid life write");fclose(f);
+        uint8_t *field=blob+8538557-64+slot*8;uint64_t saved=valid[slot];
+        fixture_u64(field,UINT64_MAX);wear_sha256(blob+96,8538461,blob+56);
+        f=fopen(bad,"wb");CHECK(f && fwrite(blob,1,8538557,f)==8538557,"checksummed invalid life write");fclose(f);
         rejection(rom,bad,save,b,"checksummed invalid life slot rejected");fixture_u64(field,saved);
     }
     for(size_t i=0;i<sizeof invalids/sizeof *invalids;i++) {
-        for(int slot=0;slot<8;slot++) fixture_u64(blob+8536445+8*slot,invalids[i][slot]);
-        wear_sha256(blob+96,8536413,blob+56);f=fopen(bad,"wb");CHECK(f && fwrite(blob,1,8536509,f)==8536509,"invalid initialized on-disk ledger fixture");fclose(f);
+        for(int slot=0;slot<8;slot++) fixture_u64(blob+8538493+8*slot,invalids[i][slot]);
+        wear_sha256(blob+96,8538461,blob+56);f=fopen(bad,"wb");CHECK(f && fwrite(blob,1,8538557,f)==8538557,"invalid initialized on-disk ledger fixture");fclose(f);
         CHECK(wear_open(rom,bad,error)==NULL,"checksummed invalid initialization or enum rejected on restore");
     }
     for(int slot=0;slot<8;slot++) {
-        copy_file(save,bad);int fd=open(bad,O_RDWR);CHECK(fd>=0 && lseek(fd,8536445+8*slot,SEEK_SET)==8536445+8*slot,"trailer checksum fixture offset");
+        copy_file(save,bad);int fd=open(bad,O_RDWR);CHECK(fd>=0 && lseek(fd,8538493+8*slot,SEEK_SET)==8538493+8*slot,"trailer checksum fixture offset");
         uint8_t byte;CHECK(read(fd,&byte,1)==1,"trailer checksum fixture read");byte^=1;CHECK(lseek(fd,-1,SEEK_CUR)>=0 && write(fd,&byte,1)==1,"trailer checksum fixture mutation");close(fd);
         CHECK(wear_open(rom,bad,error)==NULL,"each trailer slot covered by checksum");
     }
-    for(int bytes=1;bytes<=64;bytes++) {copy_file(save,bad);CHECK(truncate(bad,8536509-bytes)==0,"truncated life trailer fixture");CHECK(wear_open(rom,bad,error)==NULL,"every trailer truncation rejected");}
+    for(int bytes=1;bytes<=64;bytes++) {copy_file(save,bad);CHECK(truncate(bad,8538557-bytes)==0,"truncated life trailer fixture");CHECK(wear_open(rom,bad,error)==NULL,"every trailer truncation rejected");}
     WearBackend *c=wear_open(rom,save,error);CHECK(c && wear_read_life(c,out) && !memcmp(out,valid,sizeof out),"life metadata persists across reopen");
     equal_state(b,c,"life guest pacing and metadata reopen identical");
     CHECK(wear_write_life(b,zero,error) && wear_read_life(b,out) && !memcmp(out,zero,sizeof zero),"schema0 accepts exactly all zero");
@@ -393,6 +413,7 @@ static void synthetic(const char *dir) {
     uint8_t *image=malloc(PS_ROM_SIZE);CHECK(image!=NULL,"synthetic allocation");memset(image,0xff,PS_ROM_SIZE);
     uint32_t reset=0x02400100;for(int i=0;i<4;i++) image[0x400000+i]=(uint8_t)(reset>>(i*8));
     FILE *f=fopen(rom,"wb");CHECK(f!=NULL && fwrite(image,1,PS_ROM_SIZE,f)==PS_ROM_SIZE,"synthetic firmware fixture");fclose(f);free(image);
+    downloaded_ram(rom,dir);
     life_metadata(rom,dir);
 #ifdef WEAR_FAULT_TEST
     persistence_faults(rom,dir);
@@ -436,21 +457,21 @@ static void real_rom(const char *rom,const char *dir) {
 static void real_old_fixture(const char *rom,const char *dir,const char *original,int version) {
     char copy[1024];path(copy,dir,version==1?"actual-v1.sav":"actual-v2.sav");
     uint8_t original_hash[32],after_hash[32];file_digest(original,original_hash);copy_file(original,copy);
-    size_t old_n=version==1?8536437:8536445;uint8_t *before=malloc(8536509),*after=malloc(8536509);
+    size_t old_n=version==1?8536437:8536445;uint8_t *before=malloc(8536509),*after=malloc(8538557);
     FILE *f=fopen(copy,"rb");CHECK(f && before && after && fread(before,1,old_n,f)==old_n && fgetc(f)==EOF,"genuine old writer size");fclose(f);
     CHECK(before[8]==version,"genuine old writer version");WearBackend *b=wear_open(rom,copy,error);CHECK(b!=NULL,"genuine old writer restore");
     uint64_t life[8],zero[8]={0};uint8_t receipt[32];CHECK(wear_read_life(b,life) && !memcmp(life,zero,sizeof life),"genuine old writer has zero metadata");
     CHECK(wear_committed_payload_hash(b,receipt) && !memcmp(receipt,before+56,32),"genuine old writer exact validated receipt");
     double v1_deadline=wear_state(b)->emu_secs;CHECK(wear_save(b,error),"genuine old writer migration checkpoint");
-    f=fopen(copy,"rb");CHECK(f && fread(after,1,8536509,f)==8536509 && fgetc(f)==EOF,"genuine migration exact v3 size");fclose(f);
-    CHECK(after[8]==3 && !memcmp(before+96,after+96,8536341),"genuine migration every guest NOR byte and offset retained");
-    if(version==2) CHECK(!memcmp(before+8536437,after+8536437,8),"genuine v2 exact deadline retained");
-    else {uint64_t bits;memcpy(&bits,&v1_deadline,8);uint8_t expected[8];fixture_u64(expected,bits);CHECK(!memcmp(expected,after+8536437,8),"genuine v1 deadline anchored at original guest time");}
-    for(int i=0;i<64;i++) CHECK(after[8536445+i]==0,"genuine old migration adds only zero life trailer");
+    f=fopen(copy,"rb");CHECK(f && fread(after,1,8538557,f)==8538557 && fgetc(f)==EOF,"genuine migration exact v4 size");fclose(f);
+    uint8_t *old_wire=malloc(8536341);CHECK(old_wire!=NULL,"legacy comparison allocation");old_guest(wear_state(b),old_wire);CHECK(after[8]==4 && !memcmp(before+96,old_wire,8536341),"genuine migration every old guest NOR byte retained");free(old_wire);
+    if(version==2) CHECK(!memcmp(before+8536437,after+8538485,8),"genuine v2 exact deadline retained");
+    else {uint64_t bits;memcpy(&bits,&v1_deadline,8);uint8_t expected[8];fixture_u64(expected,bits);CHECK(!memcmp(expected,after+8538485,8),"genuine v1 deadline anchored at original guest time");}
+    for(int i=0;i<64;i++) CHECK(after[8538493+i]==0,"genuine old migration adds only zero life trailer");
     CHECK(wear_committed_payload_hash(b,receipt) && !memcmp(receipt,after+56,32),"genuine migrated commit exact checksum");
-    WearBackend *c=wear_open(rom,copy,error);CHECK(c!=NULL,"genuine migrated v3 reopens");equal_state(b,c,"genuine migrated guest pacing metadata preserved");wear_close(b);wear_close(c);
+    WearBackend *c=wear_open(rom,copy,error);CHECK(c!=NULL,"genuine migrated v4 reopens");equal_state(b,c,"genuine migrated guest pacing metadata preserved");wear_close(b);wear_close(c);
     file_digest(original,after_hash);CHECK(!memcmp(original_hash,after_hash,32),"original backup remains untouched");free(before);free(after);
-    printf("Genuine prior-writer v%d copy migrated to v3, 8536509 bytes; original unchanged\n",version);
+    printf("Genuine prior-writer v%d copy migrated to v4, 8538557 bytes; original unchanged\n",version);
 }
 int main(int argc,char **argv) {
     const uint8_t expected[32]={0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad};

@@ -23,6 +23,6 @@ int wear_write_life(WearBackend *b, const uint64_t fields[8], char error[160]);
 /* Last validated restore or durable save's actual on-disk payload checksum.
  * Returns false without touching out before a commit or on invalid arguments. */
 int wear_committed_payload_hash(const WearBackend *b, uint8_t out[32]);
-/* Digest covers canonical guest/NOR, pacing and the working v3 life trailer. */
+/* Digest covers canonical guest/NOR, pacing and the working life trailer. */
 void wear_state_digest(const WearBackend *b, uint8_t out[32]);
 #endif

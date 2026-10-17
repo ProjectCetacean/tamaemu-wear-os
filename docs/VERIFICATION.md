@@ -6,7 +6,7 @@ The tests use synthetic inputs and do not require proprietary firmware.
 
 The [Wear workflow](../.github/workflows/wear.yml) runs:
 
-- Python helper tests, native CTest, host JNI, native-save-to-Tile-reader tests and Java model tests.
+- Python helper tests, the upstream desktop suite, native CTest, host JNI, native-save-to-Tile-reader tests and Java model tests.
 - Debug and Release builds, separate audio QA builds and a Tile transport test build.
 - Native compiler-flag checks across three ABIs, APK privacy, signature and alignment checks, and checks that test code stays out of production builds.
 - Android unit tests, QA-input tests and Debug/Release lint.
@@ -14,6 +14,16 @@ The [Wear workflow](../.github/workflows/wear.yml) runs:
 The [Wear OS guide](WEAR_OS.md#build-prerequisites) lists the tools and commands. Manual workflow runs skip the repeated host tests, so use a full pull-request run to run every automated check. Check the run for the commit you plan to build or distribute.
 
 These checks do not establish firmware compatibility or watch behavior. Synthetic audio timing does not measure input-to-speaker delay.
+
+## Upstream desktop checks
+
+On a POSIX host with an existing C compiler, run the inherited firmware-free suite:
+
+```sh
+scripts/test-upstream-desktop.sh
+```
+
+The helper compiles `tests/test_all.c` and its core, save-container and download-library dependencies. It runs in a separate ignored directory with synthetic files and loopback connections. It does not build or test the Windows launcher, SDL rendering or watch save migration. Windows-specific save-path expectations remain in the source suite.
 
 ## Publication checks
 
@@ -52,6 +62,10 @@ The future public repository must retain the upstream fork relationship, enable 
 Review the exact source commit, its outgoing history and each artifact intended for distribution. Passing source checks does not inspect a later commit or prove that a separately built APK contains only that source. Keep APK privacy, signing and alignment checks tied to the actual binary. Human review and an explicit release decision are still required. These helpers do not publish a repository or release.
 
 ## Watch testing
+
+Wear 10 at [source commit `1ad4b62`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/1ad4b62c7579d1fdd6b89c5131ac0900e46b8f2a) was installed with the existing signer, with installed bytes matching the signed artifact. One existing iD L clock-setting checkpoint migrated from version 3 to version 4 with a valid payload checksum. Normal mode was preserved, checkpoint generations advanced, and cold process reopen and resaving succeeded. The foreground marker was absent after the lifecycle save completed.
+
+This check used the Debug production package. It does not establish migration for every firmware or checkpoint; versions 1 and 2 have synthetic coverage only. Hardware Tile behavior, buttons and speaker latency were outside this check. The [Android CI run for that source](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39001537544) passed 279 Android test cases with no failures, errors or skips.
 
 Rapid-press sound lag and continuity remain unresolved. Acoustic delay, sustained gameplay, battery consumption, long-gap replay, injected save-I/O failure recovery, TalkBack, large fonts and appearance across different watches still need testing.
 

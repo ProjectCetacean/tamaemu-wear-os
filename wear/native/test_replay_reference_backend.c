@@ -1,5 +1,6 @@
 /* Test-only slow oracle, frozen from d269385 on 2026-10-16.
- * Keep the original execution loop independent of production optimizations. */
+ * Keep the original execution loop independent of production optimizations.
+ * Wire codec alone updated for upstream 79e19b6 RAM expansion and v4. */
 #include "test_replay_reference_names.h"
 #define _POSIX_C_SOURCE 200809L
 #include "backend.h"
@@ -37,14 +38,20 @@ static const struct Field fields[]={
 #define HEADER_N 96
 #define PACING_N 8
 #define LIFE_N 64
-/* v2 appends its IEEE-754 deadline; v3 appends exactly eight LE uint64
- * host slots after it. Every original guest/NOR offset remains unchanged. */
+/* v2 adds a deadline; v3 adds eight host slots. v4 expands download RAM
+ * from 2K to 4K. Legacy wire counts remain fixed and restore zero-extends
+ * the formerly unmapped upper RAM; host slot meanings are unchanged. */
+_Static_assert(sizeof(((Emu *)0)->dstram)==4096,"v4 download RAM schema");
 static void put_double(uint8_t *p,double value);
 static double get_double(const uint8_t *p);
 static void error_set(char error[160],const char *message) {if(error) snprintf(error,160,"%s",message);}
-static size_t state_size(void) {
-    size_t n=0;for(size_t i=0;i<sizeof fields/sizeof *fields;i++) n+=fields[i].count*fields[i].size;return n;
+static size_t wire_count(const struct Field *f,uint64_t version) {
+    return version<4 && f->offset==offsetof(Emu,dstram) ? 2048 : f->count;
 }
+static size_t state_size_for(uint64_t version) {
+    size_t n=0;for(size_t i=0;i<sizeof fields/sizeof *fields;i++) n+=wire_count(&fields[i],version)*fields[i].size;return n;
+}
+static size_t state_size(void) {return state_size_for(4);}
 static void put64(uint8_t *p,uint64_t n) {for(int i=0;i<8;i++) p[i]=(uint8_t)(n>>(i*8));}
 static uint64_t get64(const uint8_t *p) {uint64_t n=0;for(int i=0;i<8;i++) n|=(uint64_t)p[i]<<(i*8);return n;}
 static void put_double(uint8_t *p,double value) {uint64_t bits;memcpy(&bits,&value,8);put64(p,bits);}
@@ -64,10 +71,10 @@ static void encode(const Emu *e,uint8_t *out) {
         }
     }
 }
-static int decode(Emu *e,const uint8_t *in) {
+static int decode(Emu *e,const uint8_t *in,uint64_t version) {
     for(size_t i=0;i<sizeof fields/sizeof *fields;i++) {
         const struct Field *f=&fields[i];
-        for(size_t j=0;j<f->count;j++) {
+        for(size_t j=0;j<wire_count(f,version);j++) {
             uint64_t v=0;for(size_t k=0;k<f->size;k++) v|=(uint64_t)*in++<<(k*8);
             if(f->kind==BOOL && v>1) return 0;
             uint8_t *dst=(uint8_t *)e+f->offset+j*f->stride;
@@ -125,11 +132,13 @@ static int restore(WearBackend *b,char error[160]) {
     int ok=0;
     if(!payload || !candidate) {error_set(error,"Save restore allocation failed");goto done;}
     if(!read_exact(f,h,sizeof h) || memcmp(h,"TAMAWEAR",8) ||
-       (get64(h+8)!=1 && get64(h+8)!=2 && get64(h+8)!=3)) {
+       (get64(h+8)<1 || get64(h+8)>4)) {
         error_set(error,"Save is truncated or incompatible");goto done;
     }
-    if(get64(h+8)>=2) n+=PACING_N;
-    if(get64(h+8)==3) n+=LIFE_N;
+    uint64_t version=get64(h+8);
+    guest_n=state_size_for(version)+b->e->dev.rom_size;n=guest_n;
+    if(version>=2) n+=PACING_N;
+    if(version>=3) n+=LIFE_N;
     if(get64(h+16)!=n || memcmp(h+24,b->rom_id,32) || memcmp(h+88,"idl\0\0\0\0\0",8) ||
        !read_exact(f,payload,n) || fgetc(f)!=EOF || ferror(f)) {
         error_set(error,"Save is truncated, incompatible, or belongs to another ROM");goto done;
@@ -137,7 +146,7 @@ static int restore(WearBackend *b,char error[160]) {
     wear_sha256(payload,n,digest);
     if(memcmp(digest,h+56,32)) {error_set(error,"Save integrity check failed");goto done;}
     candidate->dev=b->e->dev;
-    if(!decode(candidate,payload)) {error_set(error,"Save contains invalid emulator state");goto done;}
+    if(!decode(candidate,payload,version)) {error_set(error,"Save contains invalid emulator state");goto done;}
     /* Legacy files have no pacing state. Anchor at the saved guest time;
      * never reset the guest or infer suspended wall time. v2 retains exact
      * sub-quantum overshoot even across changing MCLKs and repeated saves. */
@@ -147,10 +156,10 @@ static int restore(WearBackend *b,char error[160]) {
         error_set(error,"Save contains invalid foreground pacing state");goto done;
     }
     uint64_t life[8]={0};
-    if(get64(h+8)==3) for(int i=0;i<8;i++) life[i]=get64(payload+guest_n+PACING_N+8*i);
+    if(version>=3) for(int i=0;i<8;i++) life[i]=get64(payload+guest_n+PACING_N+8*i);
     if(!life_valid(life)) {error_set(error,"Save contains invalid life metadata");goto done;}
     candidate->rom=b->e->rom;
-    memcpy(candidate->rom,payload+state_size(),candidate->dev.rom_size);
+    memcpy(candidate->rom,payload+state_size_for(version),candidate->dev.rom_size);
     free(b->e); b->e=candidate; b->deadline=deadline; candidate=NULL;
     memcpy(b->life,life,sizeof life);memcpy(b->committed_hash,h+56,32);b->has_commit=1;ok=1;
 done:
@@ -309,7 +318,7 @@ int wear_save(WearBackend *b,char error[160]) {
     if(dir_fd<0) {error_set(error,"Cannot open save parent directory");goto done;}
     encode(b->e,payload);memcpy(payload+state_size(),b->e->rom,b->e->dev.rom_size);
     put_double(payload+guest_n,b->deadline);encode_life(b,payload+guest_n+PACING_N);
-    uint8_t h[HEADER_N]={0};memcpy(h,"TAMAWEAR",8);put64(h+8,3);put64(h+16,n);
+    uint8_t h[HEADER_N]={0};memcpy(h,"TAMAWEAR",8);put64(h+8,4);put64(h+16,n);
     memcpy(h+24,b->rom_id,32);wear_sha256(payload,n,h+56);memcpy(h+88,"idl",3);
     snprintf(temp,path_n,"%s.XXXXXX",b->save_path);
     fd=mkstemp(temp);

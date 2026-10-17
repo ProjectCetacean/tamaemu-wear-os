@@ -1,9 +1,11 @@
 #include "emu.h"
+#include "desktop_tamasave.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #define MKDIR(p) _mkdir(p)
 #else
 #include <sys/stat.h>
@@ -21,7 +23,6 @@ static void snap_dump(Emu *e, const char *path)
 
 #ifdef USE_SDL
 #include <SDL2/SDL.h>
-#include <windows.h>
 #include <timeapi.h>
 #endif
 
@@ -31,6 +32,9 @@ static struct { uint32_t addr; const char *label; bool hit; } checkpoints[] = {
     {0x0240A5BE, "LCD init variant B", false},
 };
 #define NCHECK (sizeof checkpoints / sizeof checkpoints[0])
+
+/* Snapshots only load in the build that wrote them. */
+static const char snapshot_build_id[] = __DATE__ " " __TIME__;
 
 /* Log scanner arguments at entry, after the caller's delay slot has run. */
 static bool scanlog;
@@ -143,7 +147,13 @@ static void usage(void)
       "          +/- step the game clock (1 2 5 10 30 60 120 300 600), 0=real time\n"
       "        [--stay-awake starts it on: screen never sleeps, tama keeps animating]\n"
       "        [--on-top  keep the window above other windows]\n"
-      "        [--persist-ram  keep A0RAM in <sav>.ram so the tama survives a restart]\n");
+      "        [--persist-ram  accepted for compatibility; single-core saves always keep RAM]\n"
+      "        [--import-tamasave file  replace this save from a cross save (.tamasave)]\n"
+      "        [--import-only  import the cross save, then exit without starting the game]\n"
+      "        [--force-tamasave-import  allow an older/equal cross save to replace this save]\n"
+      "        [--export-tamasave file  write a cross save (.tamasave) on exit]\n"
+      "        [--restart  cold boot, ignoring any saved machine snapshot]\n"
+      "        [--no-state  do not load or write a machine snapshot]\n");
     exit(1);
 }
 
@@ -204,8 +214,34 @@ static uint8_t scripted_mask_b(uint64_t cyc)
 }
 
 /* Core B inherits core A's profile unless --device-b overrides it. */
+static void restore_link_ram(Emu *e, const char *savpath, const char *which)
+{
+    char why[256];
+    int restored = desktop_restore_tamasave(savpath, e, NULL, 0, NULL,
+                                            why, sizeof why);
+    if (restored > 0) {
+        fprintf(stderr, "[ram] core-%s restored %u bytes from %s.tamasave\n",
+                which, (unsigned)e->dev.a0ram_size, savpath);
+    } else if (restored == 0) {
+        char rp[1088];
+        /* Migration-only link fallback: link sessions consume pets without
+         * altering them, so an absent container may still use legacy RAM. */
+        snprintf(rp, sizeof rp, "%s.ram", savpath);
+        FILE *rf = fopen(rp, "rb");
+        if (rf) {
+            size_t rn = fread(e->a0ram, 1, e->dev.a0ram_size, rf);
+            fclose(rf);
+            fprintf(stderr, "[ram] core-%s restored %zu bytes from legacy %s\n", which, rn, rp);
+        } else {
+            fprintf(stderr, "[ram] core-%s: no saved RAM yet - starting cold\n", which);
+        }
+    } else {
+        fprintf(stderr, "[tamasave] core-%s RAM not restored: %s\n", which, why);
+    }
+}
+
 static int load_core(Emu *e, const DeviceProfile *dev, const char *rompath,
-                     const char *savpath, bool persist_ram)
+                     const char *savpath)
 {
     e->dev = *dev;
     e->cmu.osc3_hz = dev->osc3_hz;
@@ -219,18 +255,7 @@ static int load_core(Emu *e, const DeviceProfile *dev, const char *rompath,
         if (sf) { fread(e->rom, 1, e->dev.rom_size, sf); fclose(sf);
                   fprintf(stderr, "[flash] core-B save %s loaded\n", savpath); }
     }
-    if (persist_ram && savpath) {
-        char rp[1088];
-        snprintf(rp, sizeof rp, "%s.ram", savpath);
-        FILE *rf = fopen(rp, "rb");
-        if (rf) {
-            size_t rn = fread(e->a0ram, 1, e->dev.a0ram_size, rf);
-            fclose(rf);
-            fprintf(stderr, "[ram] core-B restored %zu bytes from %s\n", rn, rp);
-        } else {
-            fprintf(stderr, "[ram] core-B: no %s yet - starting cold\n", rp);
-        }
-    }
+    if (savpath) restore_link_ram(e, savpath, "B");
     cpu_reset(e);
     fprintf(stderr, "[cpu] core-B reset vector -> %08x\n", e->pc);
     return 1;
@@ -250,15 +275,45 @@ static void core_persist(Emu *e, const char *savpath, const char *which)
                     (unsigned long long)e->flash_erases, savpath);
         } else fprintf(stderr, "[flash] core-%s cannot write %s\n", which, savpath);
     }
-    char rp[1088];
-    snprintf(rp, sizeof rp, "%s.ram", savpath);
-    FILE *rf = fopen(rp, "wb");
-    if (rf) {
-        fwrite(e->a0ram, 1, e->dev.a0ram_size, rf);
-        fclose(rf);
-        fprintf(stderr, "[ram] core-%s saved %u bytes -> %s\n",
-                which, (unsigned)e->dev.a0ram_size, rp);
-    } else fprintf(stderr, "[ram] core-%s cannot write %s\n", which, rp);
+    {
+        char out[1200], why[256];
+        snprintf(out, sizeof out, "%s.tamasave", savpath);
+        if (desktop_write_tamasave(savpath, out, e->dev.name,
+                                   e->rom, e->dev.rom_size,
+                                   e->a0ram, e->dev.a0ram_size,
+                                   NULL, 0, NULL, why, sizeof why))
+            fprintf(stderr, "[tamasave] core-%s cross save -> %s\n", which, out);
+        else
+            fprintf(stderr, "[tamasave] core-%s cannot write cross save: %s\n", which, why);
+    }
+}
+
+/* Leave the old save alone until the replacement is fully written and closed. */
+static int flash_save_atomic(const char *savpath, const uint8_t *rom, size_t len)
+{
+    char tmp[1088];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", savpath);
+    if (n < 0 || (size_t)n >= sizeof tmp) return 0;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return 0;
+    size_t wrote = fwrite(rom, 1, len, f);
+    int close_rc = fclose(f);
+    if (wrote != len || close_rc != 0) {
+        remove(tmp);
+        return 0;
+    }
+#ifdef _WIN32
+    if (!MoveFileExA(tmp, savpath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        remove(tmp);
+        return 0;
+    }
+#else
+    if (rename(tmp, savpath) != 0) {
+        remove(tmp);
+        return 0;
+    }
+#endif
+    return 1;
 }
 
 /* A ring-enabled PC hook also dumps the preceding 64 instructions. */
@@ -354,10 +409,17 @@ int main(int argc, char **argv)
 {
     static Emu e;
     const char *rompath = NULL, *bmp = NULL, *savoverride = NULL, *nfc_inject = NULL;
+    const char *import_tamasave = NULL, *export_tamasave = NULL;
     bool persist_ram = false;
+    bool import_only = false;
+    bool force_tamasave_import = false;
     const char *linkrom = NULL, *savb = NULL, *net_join = NULL, *devb_name = NULL;
     int net_host = 0, net_peer = 0, auto_port = 7878;
-    bool no_auto_link = false;
+    bool no_auto_link = false, port_set = false;
+    bool restart = false, no_state = false, state_resumed = false, state_smoke = false;
+    bool state_eligible = false;
+    char state_why[160];
+    bool test_exit_writes = false; /* Hidden: integration tests opt into exit persistence. */
     uint64_t max_cycles = 0;              /* 0 = default per mode, set below */
     double max_wall = 0, snap_secs = 0;
     uint64_t trace_from = UINT64_MAX;
@@ -398,13 +460,31 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--max-cycles") && i + 1 < argc) max_cycles = strtoull(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--dump-bmp") && i + 1 < argc) bmp = argv[++i];
         else if (!strcmp(argv[i], "--sav") && i + 1 < argc) savoverride = argv[++i];
+        /* Single-core sessions always persist RAM in the cross save; this flag
+         * remains meaningful only for headless --link write-back. */
         else if (!strcmp(argv[i], "--persist-ram")) persist_ram = true;
+        else if (!strcmp(argv[i], "--import-tamasave") && i + 1 < argc) {
+            import_tamasave = argv[++i]; persist_ram = true;
+        }
+        /* The launcher uses this mode to import an in-progress save without opening a game window. */
+        else if (!strcmp(argv[i], "--import-only")) import_only = true;
+        else if (!strcmp(argv[i], "--force-tamasave-import")) force_tamasave_import = true;
+        else if (!strcmp(argv[i], "--export-tamasave") && i + 1 < argc) {
+            export_tamasave = argv[++i]; persist_ram = true;
+        }
+        else if (!strcmp(argv[i], "--restart")) restart = true;
+        else if (!strcmp(argv[i], "--no-state")) no_state = true;
+        else if (!strcmp(argv[i], "--state-smoke")) state_smoke = true;
+        else if (!strcmp(argv[i], "--test-exit-writes")) test_exit_writes = true;
         else if (!strcmp(argv[i], "--link") && i + 1 < argc) linkrom = argv[++i];
         else if (!strcmp(argv[i], "--host")) net_host = (i + 1 < argc && argv[i+1][0] != '-')
                                                         ? atoi(argv[++i]) : 7878;
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) net_join = argv[++i];
         else if (!strcmp(argv[i], "--no-auto-link")) no_auto_link = true;
-        else if (!strcmp(argv[i], "--ir-port") && i + 1 < argc) auto_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ir-port") && i + 1 < argc) {
+            auto_port = atoi(argv[++i]);
+            port_set = true;
+        }
         else if (!strcmp(argv[i], "--peer")) net_peer = (i + 1 < argc && argv[i+1][0] != '-')
                                                         ? atoi(argv[++i]) : 7878;
         else if (!strcmp(argv[i], "--sav-b") && i + 1 < argc) savb = argv[++i];
@@ -502,6 +582,16 @@ int main(int argc, char **argv)
         else usage();
     }
     if (!rompath) usage();
+    /* Test-only and deliberately independent: no normal headless option enables writes. */
+    if (test_exit_writes) persist_ram = true;
+    if (import_only && !import_tamasave) {
+        fprintf(stderr, "[tamasave] --import-only requires --import-tamasave\n");
+        return 1;
+    }
+    if (state_smoke && (linkrom || net_host || net_join || net_peer)) {
+        fprintf(stderr, "[state] --state-smoke only supports standalone sessions\n");
+        return 1;
+    }
     {
         extern int t16_extra_shift[6];
         const char *ts = getenv("TAMAEMU_TSHIFT");
@@ -516,6 +606,11 @@ int main(int argc, char **argv)
 #else
         max_cycles = 400000000ULL;        /* ~20 s of 20 MHz silicon */
 #endif
+    }
+    if (state_smoke) {
+        /* Test the normal shutdown path without opening an SDL window. */
+        headless = true;
+        if (max_cycles == UINT64_MAX) max_cycles = 4096;
     }
 
     fprintf(stderr, "[emu] tamaemu (%s) build %s %s (deadline pacing)\n",
@@ -540,27 +635,46 @@ int main(int argc, char **argv)
         if (!savepath_mkdirs(rompath, &e.dev))
             fprintf(stderr, "[flash] cannot create save folder for %s\n", rompath);
         savpath = savpath_buf;
+        {
+            char legacy_savpath[1024];
+            if (!savepath_legacy_default(legacy_savpath, sizeof legacy_savpath,
+                                         rompath, &e.dev) ||
+                !savepath_migrate_legacy(legacy_savpath, savpath)) {
+                fprintf(stderr, "[flash] cannot move the old save bundle into %s\n", savpath);
+                return 1;
+            }
+        }
+    }
+    if (import_tamasave) {
+        char import_why[256];
+        if (!desktop_import_tamasave(import_tamasave, savpath, e.dev.name,
+                                     e.dev.rom_size, force_tamasave_import,
+                                     import_why, sizeof import_why)) {
+            fprintf(stderr, "[tamasave] cannot import %s: %s\n", import_tamasave, import_why);
+            return 1;
+        }
+        fprintf(stderr, "[tamasave] imported %s -> %s\n", import_tamasave, savpath);
+    }
+    if (import_only) return 0;
+    {
+        uintptr_t sav_lock = 0;
+        char lock_why[1200];
+        if (!state_sav_lock_acquire(savpath, &sav_lock, lock_why, sizeof lock_why)) {
+            fprintf(stderr, "[sav] refusing: %s\n", lock_why);
+#ifdef USE_SDL
+            if (!headless)
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "tamaemu", lock_why, NULL);
+#endif
+            return 1;
+        }
+        /* Deliberately retain sav_lock until process exit. FILE_FLAG_DELETE_ON_CLOSE
+         * removes the Windows sidecar even if this process crashes. */
     }
     FILE *sf = fopen(savpath, "rb");
     if (sf) {
         size_t sn = fread(e.rom, 1, e.dev.rom_size, sf);
         fclose(sf);
         fprintf(stderr, "[flash] loaded save image %s (%zu bytes)\n", savpath, sn);
-    }
-
-    /* --persist-ram stores battery-backed A0RAM in <sav>.ram. IVRAM, DSTRAM,
-     * and CPU state are intentionally rebuilt on reset. */
-    char rampath[1088];
-    if (persist_ram) {
-        snprintf(rampath, sizeof rampath, "%s.ram", savpath);
-        FILE *rf = fopen(rampath, "rb");
-        if (rf) {
-            size_t rn = fread(e.a0ram, 1, e.dev.a0ram_size, rf);
-            fclose(rf);
-            fprintf(stderr, "[ram] restored %zu bytes from %s\n", rn, rampath);
-        } else {
-            fprintf(stderr, "[ram] no %s yet - starting cold\n", rampath);
-        }
     }
 
     if (dis_hi) {
@@ -575,9 +689,6 @@ int main(int argc, char **argv)
         }
         return 0;
     }
-
-    cpu_reset(&e);
-    fprintf(stderr, "[cpu] reset vector -> %08x\n", e.pc);
 
     /* --nfc-inject and --link cannot both answer the same ATR_REQ. */
     if (nfc_inject) {
@@ -629,7 +740,7 @@ int main(int argc, char **argv)
     /* Auto-link follows the firmware's connect-mode state. */
     if (!linkrom && !net_host && !net_join && !net_peer) {
         e.auto_link = !no_auto_link;
-        e.auto_link_port = auto_port;
+        e.auto_link_port = auto_link_default_port(&e.dev, auto_port, port_set);
     }
 
     /* --host/--join runs one core over the socket transport. */
@@ -672,7 +783,8 @@ int main(int argc, char **argv)
                             "pass distinct --sav and --sav-b paths.\n", savpath);
             return 1;
         }
-        if (!load_core(&eb, devb, linkrom, savb, persist_ram)) return 1;
+        if (savpath) restore_link_ram(&e, savpath, "A");
+        if (!load_core(&eb, devb, linkrom, savb)) return 1;
         e.link = &link;  e.core_id = 0;
         eb.link = &link; eb.core_id = 1;
         /* Core B inherits core A's diagnostics, clock, strap, and RTC settings. */
@@ -926,6 +1038,76 @@ int main(int argc, char **argv)
 #else
     (void)headless;
 #endif
+
+    {
+        bool state_interactive = false;
+        StateResult state_result = STATE_NONE;
+        int container_result;
+        char restore_why[256];
+
+#ifdef USE_SDL
+        state_interactive = !headless;
+#endif
+        /* The hidden smoke override exercises the complete interactive persistence
+         * lifecycle under headless execution, including launch-side restoration. */
+        state_eligible = state_session_eligible(state_interactive || state_smoke || test_exit_writes,
+                                                false, false, false, false, no_state);
+
+        /* The raw .sav is canonical: external tools may patch its flash between
+         * sessions, so this path never reads the container's embedded SAV record. */
+        container_result = desktop_restore_tamasave(savpath, &e, snapshot_build_id,
+                                                    state_eligible && !restart,
+                                                    &state_result,
+                                                    restore_why, sizeof restore_why);
+        if (container_result == 0) {
+            char legacy_ram[1088];
+            FILE *rf;
+            /* Migration reader only: once a container exists, retired sidecars
+             * are neither loaded nor written. */
+            snprintf(legacy_ram, sizeof legacy_ram, "%s.ram", savpath);
+            rf = fopen(legacy_ram, "rb");
+            if (rf) {
+                size_t rn = fread(e.a0ram, 1, e.dev.a0ram_size, rf);
+                fclose(rf);
+                fprintf(stderr, "[ram] restored %zu bytes from legacy %s\n", rn, legacy_ram);
+            }
+            state_result = state_restore_or_reset(&e, savpath, snapshot_build_id,
+                                                   state_eligible, restart,
+                                                   state_why, sizeof state_why);
+        } else if (container_result < 0) {
+            /* A damaged cross save is retained for recovery; boot only from flash. */
+            fprintf(stderr, "[tamasave] not restored: %s\n", restore_why);
+            cpu_reset(&e);
+        } else if (state_result == STATE_LOADED) {
+            fprintf(stderr, "[tamasave] restored RAM + session from %s.tamasave\n", savpath);
+        } else if (state_result != STATE_LOADED) {
+            if (state_result == STATE_REJECTED || state_result == STATE_IO_ERROR)
+                fprintf(stderr, "[tamasave] restored RAM; session not resumed: %s\n", restore_why);
+            cpu_reset(&e);
+        }
+        state_resumed = state_result == STATE_LOADED;
+        if (state_resumed) {
+            fprintf(stderr, "[state] resumed at cycle %llu pc=%08x\n",
+                    (unsigned long long)e.cycles, e.pc);
+        } else {
+            fprintf(stderr, "[cpu] reset vector -> %08x\n", e.pc);
+        }
+    }
+
+    /* The smoke test changes RAM and flash, then uses the usual shutdown path. */
+    if (state_smoke) {
+        size_t probe = e.dev.a0ram_size ? (size_t)e.dev.a0ram_size - 1 : 0;
+        /* max_cycles is normally absolute. Give a resumed smoke run a new
+         * slice so it executes after restoring state. */
+        if (max_cycles <= e.cycles) max_cycles = e.cycles + 4096;
+        uint8_t before = e.a0ram[probe];
+        e.a0ram[probe] = (uint8_t)(before + 1);
+        e.rom[e.dev.rom_size - 1] ^= 0x5Au;
+        e.flash_dirty = true;
+        fprintf(stderr, "[state] smoke %s entry pc=%08x cycle=%llu ram=%u next=%u\n",
+                state_resumed ? "resumed" : "cold", e.pc,
+                (unsigned long long)e.cycles, before, e.a0ram[probe]);
+    }
 
     uint64_t next_spin_check = 8000000, spin_lcd = 0, spin_io = 0;
     uint64_t next_frame = 0;
@@ -1315,16 +1497,20 @@ int main(int argc, char **argv)
 
     if (e.ir_log) link_ir_pc_report(&e);
 
-    /* Write the sidecar if flash changed this session, or if no save exists yet,
-     * so a resume-only ROM that never wrote flash still gets a .sav the installer
-     * can edit. The analysis-only modes returned earlier and never reach here. */
+    if (state_smoke) {
+        size_t probe = e.dev.a0ram_size ? (size_t)e.dev.a0ram_size - 1 : 0;
+        fprintf(stderr, "[state] smoke exit pc=%08x cycle=%llu ram=%u\n",
+                e.pc, (unsigned long long)e.cycles, e.a0ram[probe]);
+    }
+
+    /* Write a .sav after a flash change, or create one for a new session. */
     bool sav_exists = false;
+    bool flash_ready;
     { FILE *tf = fopen(savpath, "rb"); if (tf) { sav_exists = true; fclose(tf); } }
+    flash_ready = sav_exists && !e.flash_dirty;
     if (e.flash_dirty || !sav_exists) {
-        FILE *of = fopen(savpath, "wb");
-        if (of) {
-            fwrite(e.rom, 1, e.dev.rom_size, of);
-            fclose(of);
+        if (flash_save_atomic(savpath, e.rom, e.dev.rom_size)) {
+            flash_ready = true;
             fprintf(stderr, "[flash] %llu programs, %llu erases, %llu recovery-delay hits -> %s %s\n",
                     (unsigned long long)e.flash_programs,
                     (unsigned long long)e.flash_erases,
@@ -1333,16 +1519,40 @@ int main(int argc, char **argv)
         } else fprintf(stderr, "[flash] cannot write %s\n", savpath);
     }
 
-    /* A0RAM changes every frame, so persistent RAM is always written. */
-    if (persist_ram) {
-        FILE *rf = fopen(rampath, "wb");
-        if (rf) {
-            fwrite(e.a0ram, 1, e.dev.a0ram_size, rf);
-            fclose(rf);
-            fprintf(stderr, "[ram] saved %u bytes -> %s\n",
-                    (unsigned)e.dev.a0ram_size, rampath);
-        } else fprintf(stderr, "[ram] cannot write %s\n", rampath);
+    /* The native snapshot is carried in the cross save; no .state sidecar is written. */
+    bool state_ready = true;
+    uint8_t *state_blob = NULL;
+    size_t state_blob_len = 0;
+    if (state_eligible && !e.stopped && flash_ready && state_ready &&
+        !state_encode(&e, snapshot_build_id, &state_blob, &state_blob_len,
+                      state_why, sizeof state_why)) {
+        state_ready = false;
+        fprintf(stderr, "[state] cannot encode machine snapshot: %s\n", state_why);
     }
+
+    /* A0RAM changes every frame, so a successful interactive exit always writes it
+     * into the cross save. The hidden test flag is the only headless exception. */
+    if ((!headless || test_exit_writes) && flash_ready && state_ready) {
+        char auto_handoff[1200], handoff_why[256];
+        const char *handoff;
+        snprintf(auto_handoff, sizeof auto_handoff, "%s.tamasave", savpath);
+        handoff = auto_handoff;
+        if (desktop_write_tamasave(savpath, handoff, e.dev.name,
+                                   e.rom, e.dev.rom_size, e.a0ram, e.dev.a0ram_size,
+                                   no_state ? NULL : state_blob, no_state ? 0 : state_blob_len,
+                                   snapshot_build_id, handoff_why, sizeof handoff_why))
+            fprintf(stderr, "[tamasave] cross save -> %s\n", handoff);
+        else
+            fprintf(stderr, "[tamasave] cannot write cross save: %s\n", handoff_why);
+        if (export_tamasave && !strcmp(handoff_why, "saved")) {
+            if (desktop_export_tamasave(savpath, export_tamasave, e.dev.name,
+                                        handoff_why, sizeof handoff_why))
+                fprintf(stderr, "[tamasave] cross save -> %s\n", export_tamasave);
+            else
+                fprintf(stderr, "[tamasave] cannot export cross save: %s\n", handoff_why);
+        }
+    }
+    free(state_blob);
     fprintf(stderr, "[end] piezo tone events (T0): %u\n", e.tone_ev_w);
     fprintf(stderr, "[end] cycles=%llu pc=%08x stopped=%d halted=%d wall=%.1fs\n",
             (unsigned long long)e.cycles, e.pc, e.stopped, e.halted,

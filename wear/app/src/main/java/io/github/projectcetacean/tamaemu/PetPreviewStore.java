@@ -10,7 +10,7 @@ import java.util.*;
 public final class PetPreviewStore {
     private static final byte[] MAGIC={'T','A','M','A','P','R','E','V'};
     private static final int RECORD_BYTES=8+4+32+8+8+4+4+8+4+4+4+65536+32;
-    private static final int SAVE_HEADER=96, V3_PAYLOAD=8536413;
+    private static final int SAVE_HEADER=96, V3_PAYLOAD=8536413, V4_PAYLOAD=8538461;
     private static final int IMAGE_BYTES=65536;
     private final File dir;
     public enum State { VALID, MISSING, UNAVAILABLE, MISMATCH }
@@ -77,10 +77,13 @@ public final class PetPreviewStore {
             if(!Arrays.equals(magic,new byte[]{'T','A','M','A','W','E','A','R'}) ||
                     !Arrays.equals(Arrays.copyOfRange(h,88,96),new byte[]{'i','d','l',0,0,0,0,0}))throw new IOException("Invalid native envelope");
             if(version==1 || version==2) return null;
-            if(version!=3 || length!=V3_PAYLOAD)throw new IOException("Invalid native payload size/schema");
+            int payloadBytes;
+            if(version==3 && length==V3_PAYLOAD)payloadBytes=V3_PAYLOAD;
+            else if(version==4 && length==V4_PAYLOAD)payloadBytes=V4_PAYLOAD;
+            else throw new IOException("Invalid native payload size/schema");
             MessageDigest md;
             try {md=MessageDigest.getInstance("SHA-256");}catch(NoSuchAlgorithmException e){throw new AssertionError(e);}
-            byte[] buffer=new byte[16384];int remaining=V3_PAYLOAD-64;
+            byte[] buffer=new byte[16384];int remaining=payloadBytes-64;
             while(remaining>0){int n=in.read(buffer,0,Math.min(remaining,buffer.length));if(n<0)throw new EOFException();md.update(buffer,0,n);remaining-=n;}
             byte[] clock=new byte[64];readFully(in,clock);md.update(clock);
             if(in.read()!=-1)throw new IOException("Trailing save bytes");
