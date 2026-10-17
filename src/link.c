@@ -227,7 +227,10 @@ static void net_release(Link *l, int flush, uint64_t now)
             fprintf(stderr, "[link] WARNING: FIFO overflow - link bytes are being dropped\n");
         }
         l->pend_n--;
-        if (best != l->pend_n) memcpy(l->pend[best], l->pend[l->pend_n], LINK_REC_N);
+        /* Keep arrival order for timestamps tied within one clock microsecond. */
+        if (best != l->pend_n)
+            memmove(l->pend[best], l->pend[best + 1],
+                    (size_t)(l->pend_n - best) * LINK_REC_N);
     }
 }
 

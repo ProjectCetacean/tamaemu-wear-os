@@ -10,10 +10,13 @@
 #include <math.h>
 #include <sys/stat.h>
 #ifdef _WIN32
+#include <winsock2.h>
 #include <direct.h>
 #define TEST_MKDIR(p) _mkdir(p)
 #define TEST_RMDIR(p) _rmdir(p)
 #else
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #define TEST_MKDIR(p) mkdir(p, 0700)
 #define TEST_RMDIR(p) rmdir(p)
@@ -810,20 +813,36 @@ static int link_rx_wait(Link *l, Link *hub)
     return -1;
 }
 
+/* Reserve an OS-assigned loopback port without racing another test process. */
+static int link_test_hub_port(Link *hub)
+{
+    CHECK(link_auto_begin(hub, 0) == 0 && hub->listening,
+          "loopback hub binds an OS-assigned port");
+    if (!hub->listening) return 0;
+    struct sockaddr_in address;
+#ifdef _WIN32
+    int length = sizeof address;
+    int ok = getsockname((SOCKET)hub->listener, (struct sockaddr *)&address, &length) == 0;
+#else
+    socklen_t length = sizeof address;
+    int ok = getsockname((int)hub->listener, (struct sockaddr *)&address, &length) == 0;
+#endif
+    CHECK(ok && address.sin_family == AF_INET && ntohs(address.sin_port) != 0,
+          "loopback hub reports its assigned IPv4 port");
+    return ok ? ntohs(address.sin_port) : 0;
+}
+
 /* Exercise guest-to-guest relay over real non-blocking loopback sockets. */
 static void test_link_hub_relay(void)
 {
-    const int port = 47881;              /* high and unlikely to clash */
     static Link hub, g1, g2;
     link_reset(&hub); link_reset(&g1); link_reset(&g2);
 
     /* Use negligible wire time so this test isolates routing from collisions. */
     link_set_tx_byte_us(&hub, 1); link_set_tx_byte_us(&g1, 1); link_set_tx_byte_us(&g2, 1);
 
-    if (link_auto_begin(&hub, port) || !hub.listening) {
-        fprintf(stderr, "[test] port %d unavailable - skipping hub relay test\n", port);
-        return;                          /* skip, do not fail: not the code's fault */
-    }
+    int port = link_test_hub_port(&hub);
+    if (!port) { link_close(&hub); return; }
     CHECK(hub.hub == 1, "auto_begin makes us the hub");
 
     char hp[64]; snprintf(hp, sizeof hp, "127.0.0.1:%d", port);
@@ -896,13 +915,10 @@ static void test_link_hub_relay(void)
  * joiner starts connecting and link_auto_poll() finishes the job. */
 static void test_link_auto_join(void)
 {
-    const int port = 47882;
     static Link hub, joiner;
     link_reset(&hub); link_reset(&joiner);
-    if (link_auto_begin(&hub, port) || !hub.listening) {
-        fprintf(stderr, "[test] port %d unavailable - skipping auto join test\n", port);
-        return;
-    }
+    int port = link_test_hub_port(&hub);
+    if (!port) { link_close(&hub); return; }
 
     CHECK(link_auto_begin(&joiner, port) == 0,
           "auto-join starts without reporting a synchronous connection");
@@ -1017,6 +1033,21 @@ static void test_link_wire_time(void)
         CHECK(link_rx(&l, 0) < 0, "still silence one us before its due");
         link_test_now(&l, 3370);
         CHECK(link_rx(&l, 0) == 0x22, "second record out at its own due");
+    }
+
+    /* Fast senders can stamp an entire burst in one microsecond. TCP preserves
+     * its arrival order; equal timestamps must not reverse pending records. */
+    {
+        static Link l; link_reset(&l);
+        for (int i = 0; i < 32; i++)
+            link_test_inject(&l, A, (uint8_t)i, 1000, DUR);
+        link_test_release(&l);
+        for (int i = 0; i < 32; i++) {
+            int got = link_rx(&l, 0);
+            CHECK(got == i, "equal-timestamp burst keeps byte %d in order (got %d)", i, got);
+        }
+        CHECK(link_rx(&l, 0) == -1, "equal-timestamp burst has exactly 32 bytes");
+        CHECK(link_collisions(&l) == 0, "same sender's equal timestamps do not collide");
     }
 
     /* A record already past due releases immediately. */
