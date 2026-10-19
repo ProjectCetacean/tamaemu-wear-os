@@ -13,14 +13,28 @@ final class AudioBackend implements EmulatorSession.Backend {
     private final LongSupplier nowMs;
     // Owner worker only. Telemetry keeps guest progress, an onset index and silence; never sample values.
     private long progress;
+    private AudioPump producerPump;
+    private long producerToken,audibleCompletedMs;
+    private void resetProducer(){producerPump=null;producerToken=0;audibleCompletedMs=0;}
+    private boolean opened;
+    private void abandonProducer(){
+        AudioPump previous=producerPump;long previousToken=producerToken;resetProducer();
+        // Focus/configuration already discarded an obsolete PCM epoch. Do not retire
+        // the retained platform request whose gain callback belongs to that lifecycle.
+        if(previous!=null)previous.invalidate(previousToken);
+    }
+    private AudioPump currentPump(){
+        try{return output.get();}catch(RuntimeException|LinkageError unavailable){return null;}
+    }
     private boolean silent, awaitingOnset;
     // Native button state, so only a real release of a held button ends a measured press.
     private final boolean[] held=new boolean[3];
     AudioBackend(EmulatorSession.Backend guest,NativeAudio audio,Supplier<AudioPump> output,LongSupplier nowMs) {
         this.guest=guest;this.audio=audio;this.output=output;this.nowMs=nowMs;
     }
-    private void enabled(long handle,boolean enabled) {
-        try{audio.enabled(handle,enabled);}catch(RuntimeException|LinkageError unavailable){ /* Guest operation remains authoritative. */ }
+    private boolean enabled(long handle,boolean enabled) {
+        try{audio.enabled(handle,enabled);return true;}
+        catch(RuntimeException|LinkageError unavailable){return false; /* Guest operation remains authoritative. */}
     }
     /** Silence is only known from an observed audible batch. */
     private void unobserved(){silent=false;awaitingOnset=false;}
@@ -29,20 +43,40 @@ final class AudioBackend implements EmulatorSession.Backend {
         try { AudioPump pump=output.get();return pump!=null&&pump.accepting(); }
         catch(RuntimeException|LinkageError unavailable){return false;}
     }
-    public long open(String rom,String save)throws Exception{return guest.open(rom,save);}
-    public void close(long handle){unobserved();Arrays.fill(held,false);enabled(handle,false);AudioPump pump=output.get();if(pump!=null)pump.invalidate();guest.close(handle);}
+    public long open(String rom,String save)throws Exception{
+        boolean reopening=opened||producerPump!=null;resetProducer();unobserved();
+        AudioPump pump=currentPump();if(reopening&&pump!=null)pump.invalidate();
+        long handle=guest.open(rom,save);opened=true;return handle;
+    }
+    public void close(long handle){resetProducer();unobserved();Arrays.fill(held,false);enabled(handle,false);AudioPump pump=output.get();if(pump!=null)pump.invalidate();guest.close(handle);}
     public int width(long handle){return guest.width(handle);}
     public int height(long handle){return guest.height(handle);}
     public void advance(long handle,int elapsed,int[] pixels)throws Exception {
-        AudioPump pump=output.get();long token=pump==null?0:pump.token();
+        AudioPump pump=currentPump();long token=pump==null?0:pump.token();
         boolean audible=elapsed>0&&pump!=null&&pump.accepting();
-        if(elapsed>0)enabled(handle,audible);
+        if(elapsed>0&&!enabled(handle,audible)){
+            if(pump!=null)pump.invalidate();audible=false;
+        }
         long start=progress;
-        guest.advance(handle,elapsed,pixels);
+        try{guest.advance(handle,elapsed,pixels);}
+        catch(Exception|LinkageError failure){resetProducer();unobserved();if(pump!=null)pump.invalidate();throw failure;}
         progress+=elapsed;
-        if(elapsed>0&&!audible)unobserved();
-        if(audible)try{short[] samples=audio.drain(handle,9600);measure(pump,pump.offer(token,samples),samples,start);}
-        catch(RuntimeException|LinkageError unavailable){unobserved();pump.invalidate();enabled(handle,false);}
+        if(elapsed<=0)return; // Render-only save captures do not drain or erase audible history.
+        if(!audible){abandonProducer();unobserved();return;}
+        try {
+            short[] samples=audio.drain(handle,9600);
+            if(currentPump()!=pump||pump.token()!=token||!pump.accepting()){
+                abandonProducer();unobserved();return;
+            }
+            if(producerPump!=pump||producerToken!=token){
+                if(producerPump!=null&&producerPump!=pump)producerPump.invalidate();
+                resetProducer();producerPump=pump;producerToken=token;
+            }
+            audibleCompletedMs=Math.addExact(audibleCompletedMs,(long)elapsed);
+            long sequence=pump.offerCompletedAdvance(token,audibleCompletedMs,samples);
+            if(samples!=null&&samples.length>0)measure(pump,sequence,samples,start);
+            else if(samples==null)unobserved();
+        } catch(RuntimeException|LinkageError unavailable){resetProducer();unobserved();pump.invalidate();enabled(handle,false);}
     }
     private void measure(AudioPump pump,long sequence,short[] samples,long start) {
         if(sequence<0){unobserved();return;}
@@ -52,7 +86,7 @@ final class AudioBackend implements EmulatorSession.Backend {
         silent=first<0;
     }
     public void headless(long handle,int elapsed)throws Exception {
-        unobserved();enabled(handle,false);AudioPump pump=output.get();if(pump!=null)pump.invalidate();
+        resetProducer();unobserved();enabled(handle,false);AudioPump pump=output.get();if(pump!=null)pump.invalidate();
         guest.headless(handle,elapsed);progress+=elapsed;
     }
     public long[] readLife(long handle){return guest.readLife(handle);}

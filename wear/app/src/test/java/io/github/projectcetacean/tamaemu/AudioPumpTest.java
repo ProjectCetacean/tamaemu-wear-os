@@ -423,7 +423,7 @@ public final class AudioPumpTest {
  /** Sample-carrying threshold sink, exercised at each virtual millisecond. */
  static final class QuietRun {
   final Fixture f=new Fixture();final List<Short> oracle=new ArrayList<>(),played=new ArrayList<>();
-  double firstTone=Double.NaN;long tailPending,tailHeld,headAdjustment;int partition=768,toneStart=2400,end=4000;Runnable afterWrite;
+  double firstTone=Double.NaN;long completed;boolean framed=true;long tailPending,tailHeld,headAdjustment;int partition=768,toneStart=2400,end=4000;Runnable afterWrite;
   final ThresholdOutput out=new ThresholdOutput(f,6000,2880){
    @Override void advance(){long before=consumed;super.advance();
     for(long i=before;i<consumed;i++){short value=accepted.get((int)i);played.add(value);
@@ -436,8 +436,13 @@ public final class AudioPumpTest {
   void offer(int from,int to,boolean shortQuiet){short[] pcm=new short[(to-from)*48];
    for(int i=0;i<pcm.length;i++){int ms=from+i/48;
     pcm[i]=(short)((ms>=toneStart&&ms<toneStart+800||shortQuiet)&&ms%80<32?1+ms/80:0);oracle.add(pcm[i]);}
-   for(int off=0;off<pcm.length;off+=partition)
-    check(f.pump.offer(f.pump.token(),Arrays.copyOfRange(pcm,off,Math.min(pcm.length,off+partition)))>0,"quiet fixture offer");}
+   // These fixture requests are integral milliseconds; progress comes from the request script.
+   for(int off=0;off<pcm.length;off+=partition){
+    int end=Math.min(pcm.length,off+partition);short[] part=Arrays.copyOfRange(pcm,off,end);
+    long seq;
+    if(framed){completed+=(end-off)/48;seq=f.pump.offerCompletedAdvance(f.pump.token(),completed,part);}
+    else seq=f.pump.offer(f.pump.token(),part);
+    check(seq>0,"quiet fixture offer");}}
   void run(boolean pause,boolean burst,boolean shortQuiet,boolean ambiguous){
    out.quantum=ambiguous?960:1;
    for(int at=1;at<=end;at++){
@@ -459,8 +464,8 @@ public final class AudioPumpTest {
   while(to>from&&pcm.get(to-1)==0)to--;return pcm.subList(from,to);}
  /** Catches the newest-call guard trimming 144 healthy frames when one delivery is split into 48-frame calls. */
  static void healthyQuietIsInvariantUnderSameTimePartitions(){
-  QuietRun control=new QuietRun();control.run(false,false,false,false);
-  for(int part:new int[]{768,384,192,48}){QuietRun r=new QuietRun();r.partition=part;r.run(false,false,false,false);
+  QuietRun control=new QuietRun();control.framed=false;control.run(false,false,false,false);
+  for(int part:new int[]{768,384,192,48}){QuietRun r=new QuietRun();r.framed=false;r.partition=part;r.run(false,false,false,false);
    check(r.oracle.equals(r.out.accepted)&&r.oracle.equals(r.played),"whole healthy quiet waveform exact partition="+part);
    check(r.firstTone==control.firstTone&&r.tailPending+r.tailHeld==control.tailPending+control.tailHeld,"healthy phase exact partition="+part);
    check(r.f.pump.latency().summary().trimmedFrames==0,"healthy quiet never compressed partition="+part);}
@@ -577,7 +582,8 @@ public final class AudioPumpTest {
     if(at<=6000&&at>=next&&!blocked){long elapsed=Math.min(100,at-lastOwner);lastOwner=at;
      long from=frames(guest),to=frames(guest+elapsed);guest+=elapsed;short[] pcm=new short[(int)(to-from)];
      for(int i=0;i<pcm.length;i++){long ms=(from+i)/48;pcm[i]=(short)(ms>=4000&&ms<4800&&ms%80<32?1+ms/80:0);oracle.add(pcm[i]);}
-     for(int i=0;i<pcm.length;i+=partition)f.pump.offer(f.pump.token(),Arrays.copyOfRange(pcm,i,Math.min(pcm.length,i+partition)));
+     // A completed logical request publishes its literal drain, including cumulative native variation.
+     f.pump.offerCompletedAdvance(f.pump.token(),guest,pcm);
      next=at+33;}
     if(!(executorGap>0&&at>=1008&&at<1008+executorGap))f.until(at);
     if(at==3900)tail=out.held+f.pump.latency().summary().pendingFrames;
@@ -603,10 +609,59 @@ public final class AudioPumpTest {
    check(noteSpan(r.oracle).equals(noteSpan(r.played)),"bounded head notes/gaps exact");
   }
  }
+ /** No producer proof means exact conservative transport, even after a real playback stall. */
+ static void unknownProducerNeverCompressesQuiet(){
+  for(int partition:new int[]{768,384,192,48}){QuietRun r=new QuietRun();r.framed=false;r.partition=partition;r.run(true,false,false,false);
+   check(r.oracle.equals(r.played)&&r.f.pump.latency().summary().trimmedFrames==0,"raw partition keeps complete waveform "+partition);}
+ }
+ /** Invalid metadata must withhold recovery while preserving every valid array's notes. */
+ static void incompleteProducerCannotAuthorizeRecovery(){
+  for(String mode:new String[]{"null","empty","short","saturated","oversized","nonmonotonic","overflow","raw"}){
+   QuietRun r=warmQuiet();Fixture f=r.f;long endpoint=r.completed+100;
+   short[] pcm=new short[mode.equals("empty")?0:mode.equals("short")?1:mode.equals("saturated")?9600:mode.equals("oversized")?9601:4800];
+   f.now=1700;
+   if(mode.equals("raw"))f.pump.offer(f.pump.token(),pcm);
+   else f.pump.offerCompletedAdvance(f.pump.token(),mode.equals("nonmonotonic")?r.completed:mode.equals("overflow")?Long.MAX_VALUE:endpoint,mode.equals("null")?null:pcm);
+   f.run();f.until(2200);AudioPump.Summary s=f.pump.latency().summary();
+   check(s.trimmedFrames==0,"invalid or missing PCM cannot create quiet debt "+mode);conserved(s,"invalid producer "+mode);
+  }
+ }
+ /** Matched abandonment retires transport; obsolete producer cleanup preserves live focus. */
+ static void producerRetirementMatchesEpoch(){
+  Fixture f=new Fixture();f.pump.configure(true);long old=f.pump.token();
+  f.pump.offerCompletedAdvance(old,16,new short[768]);f.run();AudioPump.Focus focus=f.output.focus;
+  focus.changed(false);f.run();long lost=f.pump.token();
+  f.pump.invalidate(old);f.run();
+  check(f.output.stops==0&&f.pump.token()==lost,"stale cleanup does not replace retained focus");
+  focus.changed(true);f.run();check(f.pump.accepting(),"retained gain accepted");
+  long current=f.pump.token();f.pump.offerCompletedAdvance(current,16,new short[768]);
+  f.pump.invalidate(current);f.run();
+  check(f.output.stops==1&&f.pump.latency().summary().pendingFrames==0,"matching cleanup retires pending transport once");
+  check(f.pump.offerCompletedAdvance(current,32,new short[768])<0,"retired producer cannot publish");
+  long token=f.pump.token();focus.changed(false);f.run();check(f.pump.token()==token,"retired callback cannot change replacement epoch");
+  conserved(f.pump.latency().summary(),"producer retirement");
+ }
+ /** Valid producer debt alone cannot carry a playback bound across grant changes. */
+ static void framedRecoveryRechecksGrant(){
+  QuietRun control=stalledQuietBeforeRecovery();control.f.until(2234);
+  check(control.f.pump.latency().summary().trimmedFrames>0,"unperturbed framed control really recovers on this retry");
+  for(String mode:new String[]{"threshold","capacity","write-threshold","write-capacity"}){
+   QuietRun r=stalledQuietBeforeRecovery();
+   Runnable change=()->{if(mode.endsWith("threshold"))r.out.required+=6;else r.out.capacity+=48;};
+   if(mode.startsWith("write-"))r.afterWrite=change;else change.run();
+   r.f.until(2234);
+   check(r.f.pump.latency().summary().trimmedFrames==0,"grant change vetoes framed recovery "+mode);
+   conserved(r.f.pump.latency().summary(),"changed grant "+mode);
+  }
+ }
  public static void main(String[] args){
   characteriseCurrentQueue();
   List<String> failed=new ArrayList<>();
   Map<String,Runnable> tests=new LinkedHashMap<>();
+  tests.put("producerRetirementMatchesEpoch",AudioPumpTest::producerRetirementMatchesEpoch);
+  tests.put("framedRecoveryRechecksGrant",AudioPumpTest::framedRecoveryRechecksGrant);
+  tests.put("unknownProducerNeverCompressesQuiet",AudioPumpTest::unknownProducerNeverCompressesQuiet);
+  tests.put("incompleteProducerCannotAuthorizeRecovery",AudioPumpTest::incompleteProducerCannotAuthorizeRecovery);
   tests.put("skippedProductionPreservesHealthyMargin",AudioPumpTest::skippedProductionPreservesHealthyMargin);
   tests.put("boundedHeadsRecoverWithoutLosingHealthyPcm",AudioPumpTest::boundedHeadsRecoverWithoutLosingHealthyPcm);
   tests.put("healthyQuietIsInvariantUnderSameTimePartitions",AudioPumpTest::healthyQuietIsInvariantUnderSameTimePartitions);
