@@ -204,6 +204,23 @@ public class PointerAdmissionAndroidTest {
         assertTrue(observer.violations.toString(),observer.violations.isEmpty());
     }
 
+    @Test public void periodicSaveRetainsPhysicalPointerUntilRealUp() throws Exception {
+        LifeSessionTest.InputFixture f=new LifeSessionTest.InputFixture();set(activity,"session",f.session);
+        f.worker.through(25000);eventStep=0;
+        dispatch(MotionEvent.ACTION_DOWN,new int[]{0},new float[]{x(0)},new float[]{y(0)});f.worker.through(25000);
+        // Deliver real owner status callbacks to the Activity, without invoking its native lifecycle.
+        f.session.resume(activity);f.worker.through(25000);
+        // A resume cancels its old epoch. Begin a new physical contact for this owner.
+        dispatch(MotionEvent.ACTION_UP,new int[]{0},new float[]{x(0)},new float[]{y(0)});
+        f.worker.now=26000;
+        dispatch(MotionEvent.ACTION_DOWN,new int[]{1},new float[]{x(0)},new float[]{y(0)});f.worker.through(26000);
+        f.worker.through(56000);
+        assertEquals("Activity must retain the physical contact through autosave",1,input.pressedMask());
+        assertEquals("Guest must remain held through autosave",1,f.backend.pressed);
+        dispatch(MotionEvent.ACTION_UP,new int[]{1},new float[]{x(0)},new float[]{y(0)});f.worker.through(56100);
+        assertEquals(0,input.pressedMask());assertEquals(0,f.backend.pressed);
+    }
+
     private float x(int button) { return buttons[button].getLeft() + buttons[button].getWidth() / 2f; }
     private float y(int button) { return buttons[button].getTop() + buttons[button].getHeight() / 2f; }
     private static int pointerDown(int index) { return MotionEvent.ACTION_POINTER_DOWN | index << MotionEvent.ACTION_POINTER_INDEX_SHIFT; }

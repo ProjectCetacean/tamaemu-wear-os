@@ -79,6 +79,7 @@ public final class PetTileService extends TileService {
         return buildTile(s,version,width,height,System.currentTimeMillis());
     }
     TileBuilders.Tile buildTile(PetPreviewSnapshot s,String version,int width,int height,long nowUtcMillis) {
+        if(s!=null&&(s.committedUtcMillis<PetPreviewSnapshot.MIN_UTC_MILLIS||s.committedUtcMillis>PetPreviewSnapshot.MAX_UTC_MILLIS)){s=null;version="neutral";}
         int side=Math.min(width,height);if(side<192)side=192;
         int frameSide=heroFrame(side),textWidth=rowWidth(frameSide,side);
         ModifiersBuilders.Clickable open=new ModifiersBuilders.Clickable.Builder().setId("open_pet")
@@ -101,7 +102,10 @@ public final class PetTileService extends TileService {
         if(status!=null)chip.setModifiers(new ModifiersBuilders.Modifiers.Builder().setBackground(surface(0xff242b35,12)).build())
             .addContent(text(status,10,2,0xffeff4f8));
         Box.Builder caption=row(textWidth,CAPTION_DP);
-        if(s!=null)caption.addContent(text(getString(R.string.tile_saved_time,caption(s.committedUtcMillis,nowUtcMillis)),12,1,0xffa6b1bc));
+        if(s!=null)caption.addContent(new Text.Builder()
+            .setText(getString(R.string.tile_saved_time,caption(s.committedUtcMillis,nowUtcMillis)))
+            .setMaxLines(2).setLineHeight(sp(12)).setMultilineAlignment(TEXT_ALIGN_CENTER)
+            .setFontStyle(new FontStyle.Builder().setSize(sp(12)).setColor(ColorBuilders.argb(0xffa6b1bc)).build()).build());
         Column column=new Column.Builder().setWidth(expand()).setHorizontalAlignment(HORIZONTAL_ALIGN_CENTER)
             .addContent(chip.build()).addContent(frame).addContent(caption.build()).build();
         // The whole Tile is the single open action and the single announcement.
@@ -114,7 +118,7 @@ public final class PetTileService extends TileService {
             .setTileTimeline(new TimelineBuilders.Timeline.Builder().addTimelineEntry(new TimelineBuilders.TimelineEntry.Builder()
                 .setLayout(new Layout.Builder().setRoot(root).build()).build()).build()).build();
     }
-    private static final int CHIP_DP=24,CAPTION_DP=18,MIN_ROW_DP=80;
+    private static final int CHIP_DP=24,CAPTION_DP=26,MIN_ROW_DP=68;
     /** Largest frame whose centred chip, frame and caption rows keep every corner inside radius minus 4 dp. */
     private static int heroFrame(int side) {
         double limit=side/2.0-4;
@@ -129,11 +133,10 @@ public final class PetTileService extends TileService {
         double limit=side/2.0-4,half=(frame+CHIP_DP+CAPTION_DP)/2.0;
         return half>=limit?0:Math.min(frame,(int)Math.floor(2*Math.sqrt(limit*limit-half*half)));
     }
-    /** Time for a checkpoint from today in the device zone, otherwise its date. */
+    /** Both saved time and full localized date survive a cached layout's day/year boundary. */
     private static String caption(long saved,long now) {
-        Calendar a=Calendar.getInstance(),b=Calendar.getInstance();a.setTimeInMillis(saved);b.setTimeInMillis(now);
-        boolean year=a.get(Calendar.YEAR)==b.get(Calendar.YEAR);
-        return format(year&&a.get(Calendar.DAY_OF_YEAR)==b.get(Calendar.DAY_OF_YEAR)?"HH:mm":year?"MMM d":"MMM d, yyyy",saved);
+        SimpleDateFormat date=(SimpleDateFormat)java.text.DateFormat.getDateInstance(java.text.DateFormat.SHORT,Locale.getDefault());
+        return format("HH:mm\n"+date.toPattern().replaceAll("y+","yyyy"),saved);
     }
     private static String format(String pattern,long utc) {
         return new SimpleDateFormat(pattern,Locale.getDefault()).format(new Date(utc));

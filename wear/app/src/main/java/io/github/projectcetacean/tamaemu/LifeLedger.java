@@ -76,9 +76,13 @@ final class LifeStatus {
     final LifeRecord record;
     final OwnerState state;
     final long mode,debtMs,clockQuality,committedGeneration,lastSuccessfulCommitUtcMs;
-    final boolean saving, schedulingFailed;
+    final boolean saving, schedulingFailed, inputContinuity;
     final String schedulerStatus;
     LifeStatus(LifeRecord working,LifeRecord committed,OwnerState state,long savedUtc,String scheduler,boolean schedulingFailed) {
+        this(working,committed,state,savedUtc,scheduler,schedulingFailed,false);
+    }
+    LifeStatus(LifeRecord working,LifeRecord committed,OwnerState state,long savedUtc,String scheduler,boolean schedulingFailed,boolean inputContinuity) {
+        this.inputContinuity=state==OwnerState.SAVING&&inputContinuity;
         record=working;this.state=state;mode=committed==null?0:committed.mode;
         debtMs=working==null?0:working.debtMs;clockQuality=working==null?0:working.clockQuality;
         committedGeneration=committed==null?0:committed.generation;lastSuccessfulCommitUtcMs=savedUtc;

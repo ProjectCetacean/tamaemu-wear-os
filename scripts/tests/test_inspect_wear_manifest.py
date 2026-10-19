@@ -78,18 +78,18 @@ class ManifestContract(unittest.TestCase):
     def test_current_release_version_is_accepted_for_production_and_qa(self):
         for package in ['io.github.projectcetacean.tamaemu', module.QA_PACKAGE]:
             with self.subTest(package=package):
-                self.validate_version(f"package: name='{package}' versionCode='10' versionName='0.2.0-wear.10'\n", package)
+                self.validate_version(f"package: name='{package}' versionCode='11' versionName='0.2.0-wear.11'\n", package)
 
     def test_stale_and_mixed_release_versions_are_rejected(self):
         package='io.github.projectcetacean.tamaemu'
-        for code,name in [('9','0.2.0-wear.9'),('9','0.2.0-wear.10'),
-                          ('10','0.2.0-wear.9'),('100','0.2.0-wear.10'),('10','0.2.0-wear.100')]:
+        for code,name in [('10','0.2.0-wear.10'),('10','0.2.0-wear.11'),
+                          ('11','0.2.0-wear.10'),('110','0.2.0-wear.11'),('11','0.2.0-wear.110')]:
             with self.subTest(code=code,name=name), self.assertRaisesRegex(AssertionError,'version'):
                 self.validate_version(f"package: name='{package}' versionCode='{code}' versionName='{name}'\n",package)
 
     def test_current_version_does_not_admit_the_wrong_package(self):
         with self.assertRaisesRegex(AssertionError,'package'):
-            self.validate_version("package: name='io.github.projectcetacean.tamaemu.qoltest' versionCode='10' versionName='0.2.0-wear.10'\n",
+            self.validate_version("package: name='io.github.projectcetacean.tamaemu.qoltest' versionCode='11' versionName='0.2.0-wear.11'\n",
                                   'io.github.projectcetacean.tamaemu')
 
     def test_required_tile_probe_rejects_valid_regular_qa(self):

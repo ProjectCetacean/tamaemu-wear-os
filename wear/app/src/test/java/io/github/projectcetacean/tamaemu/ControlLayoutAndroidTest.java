@@ -88,6 +88,25 @@ public class ControlLayoutAndroidTest {
     private UiPreferences overlay(){return UiPreferences.defaults().withSize(UiPreferences.Size.LARGE)
             .withControls(UiPreferences.Controls.RETRACTABLE).with("controlSpace","OVERLAY");}
 
+    @Test public void disabledCareTapCannotHideControls() throws Exception { disabledCareGesture(false); }
+    @Test public void disabledCareHoldCannotOpenSettings() throws Exception { disabledCareGesture(true); }
+    private void disabledCareGesture(boolean hold) throws Exception {
+        activity.lifeStatus(new LifeStatus(playing.record,playing.record,LifeStatus.OwnerState.SAVING,10000,"",false));measure();
+        assertFalse(buttons[0].isEnabled());assertTrue(visible());
+        Rect overlap=bounds(buttons[0]);assertTrue("Test must hit the control over the LCD",overlap.intersect(bounds(display)));
+        gesture(overlap.exactCenterX(),overlap.exactCenterY(),hold);
+        assertTrue("A disabled care tap must not reach the LCD toggle",visible());
+        assertFalse("A disabled care hold must not reach LCD Settings",(Boolean)get(layout,"settingsOpen"));
+        assertEquals("Disabled care must not dispatch guest input",0,ownerTasks);assertTrue(edges.isEmpty());
+        tapTarget();assertFalse("Uncovered LCD tap stays usable while saving",visible());
+        longTarget();assertTrue("Uncovered LCD hold stays usable while saving",(Boolean)get(layout,"settingsOpen"));
+    }
+    @Test public void windowFocusLossCancelsHeldPointerExactlyOnce() throws Exception {
+        hold(1);activity.onWindowFocusChanged(false);releasedOnce(1);
+        event(MotionEvent.ACTION_MOVE,new int[]{0},new float[]{x(1)},new float[]{y(1)});
+        lift(1);releasedOnce(1);assertEquals(0,input.pressedMask());
+        activity.onWindowFocusChanged(true);
+    }
     @Test public void overlayLargeKeepsViewportWhenToggled() throws Exception {
         Rect before=bounds(display);Rect[] abc={bounds(buttons[0]),bounds(buttons[1]),bounds(buttons[2])};assertEquals(328,display.getWidth());
         for(int i=0;i<3;i++){boolean visible=visible();tapTarget();measure();assertEquals(!visible,visible());assertEquals(before,bounds(display));

@@ -242,7 +242,7 @@ def validate_required_kind(package, probe, required_kind=None):
 
 def validate_package_version(badging, package):
     assert f"package: name='{package}'" in badging, 'APK package differs from requested package'
-    assert "versionCode='10'" in badging and "versionName='0.2.0-wear.10'" in badging, 'APK version must be 10 / 0.2.0-wear.10'
+    assert "versionCode='11'" in badging and "versionName='0.2.0-wear.11'" in badging, 'APK version must be 11 / 0.2.0-wear.11'
 
 
 def inspect(apk, tools, package, unsigned, required_kind=None):

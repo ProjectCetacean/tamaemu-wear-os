@@ -69,6 +69,10 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         state(EmulatorSession.State.LOADING);
         if (retry) session.retry(this); else session.resume(this);
     }
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && layout != null) layout.releaseControls();
+    }
     @Override protected void onPause() {
         resumed = false;
         updateAudio();
@@ -460,7 +464,8 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         private void lightHaptic() { if (preferences.haptics) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); }
         @Override public boolean performClick() { return super.performClick(); }
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (!isEnabled() || !resumed) return false;
+            // A visible disabled overlay still owns its rectangle; never pass it to LCD gestures.
+            if (!isEnabled() || !resumed) return true;
             int action = event.getActionMasked(); int index = event.getActionIndex();
             switch (action) {
                 case MotionEvent.ACTION_DOWN:

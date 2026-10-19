@@ -157,21 +157,61 @@ public class PetTileServiceAndroidTest {
             assertFalse("saved debt is not a demanded action",chipText.contains("Catch-up"));
             assertFalse(chipText.contains("Normal"));
             LayoutElementBuilders.Text caption=(LayoutElementBuilders.Text)textNode(nodes,"Saved ").element;
-            assertEquals("caption stays one line",1,caption.getMaxLines().getValue());
+            assertEquals("both saved time and date have a line",2,caption.getMaxLines().getValue());
             assertTrue("chip text contrast at least 4.5:1",contrast(chip)>=4.5);
             assertTrue("caption text contrast at least 4.5:1",contrast(textNode(nodes,"Saved "))>=4.5);
         }
     }
-    @Test public void captionUsesTimeToday() throws Exception {
-        PetPreviewSnapshot s=saved(TODAY_1432,PetPreviewSnapshot.Mode.NORMAL,false,0,0);
-        assertEquals("Saved 14:32",caption(service.buildTile(s,"today-v",192,192,NOW_1440)));
+    // Removing either saved date/year or time, or branching on build day, makes these fail.
+    @Test public void cachedCaptionIdentifiesSavedInstantAcrossMidnightAndYear() throws Exception {
+        long savedAt=local(2026,12,31,23,59);
+        PetPreviewSnapshot s=saved(savedAt,PetPreviewSnapshot.Mode.NORMAL,false,0,0);
+        TileBuilders.Tile cached=service.buildTile(s,"cached-v",192,192,savedAt+30000);
+        String expected="Saved 23:59\n12/31/2026";
+        assertEquals("cached layout must carry its saved date, full year and time",expected,caption(cached));
+        for(long builtAt:new long[]{local(2027,1,1,0,1),local(2028,1,1,0,1)}) {
+            assertEquals(expected,caption(cached));
+            assertEquals("rebuilding must not reinterpret the saved instant",expected,
+                caption(service.buildTile(s,"cached-v",192,192,builtAt)));
+        }
     }
-    @Test public void captionUsesDateWhenNotToday() throws Exception {
+    @Test public void captionUsesSavedDateAndTimeInDeviceZoneAndLocale() throws Exception {
         PetPreviewSnapshot s=saved(YESTERDAY_2359,PetPreviewSnapshot.Mode.NORMAL,false,0,0);
-        assertEquals("Saved Oct 15",caption(service.buildTile(s,"midnight-v",192,192,NOW_0001)));
-        // The same two instants share one calendar day in UTC, so the caption follows the device zone.
+        assertEquals("Saved 23:59\n10/15/2026",caption(service.buildTile(s,"zone-v",192,192,NOW_0001)));
         TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
-        assertEquals("Saved 03:59",caption(service.buildTile(s,"midnight-v",192,192,NOW_0001)));
+        assertEquals("Saved 03:59\n10/16/2026",caption(service.buildTile(s,"zone-v",192,192,NOW_0001)));
+        Locale.setDefault(Locale.FRANCE);
+        assertEquals("Saved 03:59\n16/10/2026",caption(service.buildTile(s,"locale-v",192,192,NOW_0001)));
+    }
+    @Test public void invalidSavedTimestampUsesNeutralLayoutAndOpenAction() throws Exception {
+        for(long utc:new long[]{1,PetPreviewSnapshot.MIN_UTC_MILLIS-1,PetPreviewSnapshot.MAX_UTC_MILLIS+1,Long.MAX_VALUE}) {
+            TileBuilders.Tile tile=service.buildTile(saved(utc,PetPreviewSnapshot.Mode.NORMAL,false,0,0),"invalid-v",192,192,NOW_1440);
+            assertEquals("neutral",tile.getResourcesVersion());
+            assertNull(find(nodes(tile),LayoutElementBuilders.Image.class));
+            assertEquals(Collections.singletonList(service.getString(R.string.tile_neutral)),texts(tile));
+            ModifiersBuilders.Modifiers root=modifiers(nodes(tile).get(0).element);
+            assertEquals(service.getString(R.string.tile_neutral),root.getSemantics().getContentDescription().getValue());
+            ActionBuilders.AndroidActivity open=((ActionBuilders.LaunchAction)root.getClickable().getOnClick()).getAndroidActivity();
+            assertEquals(service.getPackageName(),open.getPackageName());assertEquals(MAIN,open.getClassName());
+        }
+    }
+    @Test public void timestampHasTwoVisibleLinesAtSmallAndLargeFontSettings() throws Exception {
+        android.content.res.Configuration original=new android.content.res.Configuration(service.getResources().getConfiguration());
+        try {
+            for(float scale:new float[]{1f,2f}) {
+                android.content.res.Configuration config=new android.content.res.Configuration(original);config.fontScale=scale;
+                service.getResources().updateConfiguration(config,service.getResources().getDisplayMetrics());
+                for(int side:SIDES) {
+                    TileBuilders.Tile tile=service.buildTile(saved(TODAY_1432,PetPreviewSnapshot.Mode.NORMAL,false,0,0),"font-v",side,side,NOW_1440);
+                    Node n=textNode(nodes(tile),"Saved ");LayoutElementBuilders.Text text=(LayoutElementBuilders.Text)n.element;
+                    assertEquals("Saved 14:32\n10/16/2026",text.getText().getValue());
+                    assertEquals(2,text.getMaxLines().getValue());
+                    assertTrue("keep a legible caption size",text.getFontStyle().getSize().getValue()>=12);
+                    assertTrue("reserve both caption lines",dp(((LayoutElementBuilders.Box)n.parent.element).getHeight())>=26);
+                    assertCornersInside(tile,side);
+                }
+            }
+        } finally {service.getResources().updateConfiguration(original,service.getResources().getDisplayMetrics());}
     }
     @Test public void neutralMatchesHeroGeometry() throws Exception {
         PetPreviewSnapshot present=saved(TODAY_1432,PetPreviewSnapshot.Mode.NORMAL,false,0,0);
