@@ -248,6 +248,24 @@ public class PetTileServiceAndroidTest {
         assertTrue("exceptional status announced: "+description,description.contains(combined.exceptionalStatus()));
         assertFalse("spoken snapshot must not demand catch-up",description.contains("Catch-up"));
     }
+    @Test public void currentVerificationOverlayKeepsSavedIdentityAndEstimatedHistory() throws Exception {
+        PetPreviewSnapshot s=saved(TODAY_1432,PetPreviewSnapshot.Mode.PROTECTED,true,900,1);
+        byte[] before=PetPreviewStore.encode(s);
+        TileBuilders.Tile tile=service.buildTile(s,"proof-v",192,192,NOW_1440,TimeVerifier.Outcome.MATCH);
+        String all=texts(tile).toString();
+        assertFalse(all,all.contains("Time needs checking"));assertTrue(all,all.contains("estimated"));
+        assertTrue(all,all.contains("Protected: paused away"));assertEquals("proof-v",tile.getResourcesVersion());
+        assertEquals("Saved 14:32\n10/16/2026",caption(tile));
+        String spoken=modifiers(nodes(tile).get(0).element).getSemantics().getContentDescription().getValue();
+        assertTrue("saved timestamp remains estimated",spoken.contains("estimated"));
+        assertArrayEquals(before,PetPreviewStore.encode(s));assertEquals(1,s.clockQuality);
+        for(TimeVerifier.Outcome result:new TimeVerifier.Outcome[]{TimeVerifier.Outcome.MISMATCH,TimeVerifier.Outcome.UNAVAILABLE}){
+            assertTrue(texts(service.buildTile(s,"proof-v",192,192,NOW_1440,result)).toString().contains(TimeVerifier.notice(result)));
+        }
+        tile=service.buildTile(saved(1,PetPreviewSnapshot.Mode.NORMAL,false,0,1),"proof-v",192,192,NOW_1440,TimeVerifier.Outcome.MATCH);
+        assertEquals("neutral",tile.getResourcesVersion());assertNull(find(nodes(tile),LayoutElementBuilders.Image.class));
+    }
+
     private static final int[] SIDES={192,200,227,240,300};
     private static final String MAIN="io.github.projectcetacean.tamaemu.MainActivity";
     private static final TimeZone ZONE=TimeZone.getTimeZone("America/New_York");

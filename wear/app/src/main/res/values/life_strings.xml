@@ -3,7 +3,7 @@
     <string name="life_protected">Protected</string>
     <string name="life_normal_description">Your pet ages while you are away. Background jobs make progress when Android allows; opening the app finishes any remaining time.</string>
     <string name="life_protected_description">Paused while away. Time already owed must finish first. Care consequences still apply while the app is open.</string>
-    <string name="life_clock_estimated">Clock changed or elapsed time was estimated. Across a restart, clock edits can affect aging.</string>
+    <string name="life_clock_estimated">Earlier away time was estimated.</string>
     <string name="life_catching_up">Catching up: %1$s of pet time</string>
     <string name="life_mode_unavailable">Mode changes are available when your pet is caught up and saving has finished.</string>
     <string name="life_save_failed">Saving failed. Your current pet is held in memory. Retry saving before continuing.</string>
@@ -21,4 +21,7 @@
     <string name="life_scheduler_pending">Background scheduling status is not yet available.</string>
     <string name="life_scheduler_status">Background: %1$s</string>
     <string name="life_not_saved">No successful life checkpoint confirmed yet.</string>
+    <string name="life_clock_unavailable">Automatic time verification unavailable</string>
+    <string name="life_saved_time_invalid">Saved time needs checking</string>
+    <string name="life_updated_estimated">Updated %1$s (estimated)</string>
 </resources>

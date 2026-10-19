@@ -32,7 +32,10 @@ public final class PetTileService extends TileService {
                 PetPreviewSnapshot snapshot=read.snapshot;String version="neutral";
                 if(snapshot!=null){version=store.pinImage(snapshot);}
                 if(Thread.currentThread().isInterrupted())return neutral;
-                return buildTile(snapshot,version,width,height);
+                android.app.Application app=getApplication();
+                TimeVerifier.Outcome verification=app instanceof TamaemuApplication
+                        ?((TamaemuApplication)app).verifyTime():TimeVerifier.Outcome.UNAVAILABLE;
+                return buildTile(snapshot,version,width,height,System.currentTimeMillis(),verification);
             },neutral,result->completePreview(token,()->completer.set(result),()->completer.set(neutral)));
             completer.addCancellationListener(cancel,Runnable::run);
             return "Pet checkpoint Tile";
@@ -79,13 +82,16 @@ public final class PetTileService extends TileService {
         return buildTile(s,version,width,height,System.currentTimeMillis());
     }
     TileBuilders.Tile buildTile(PetPreviewSnapshot s,String version,int width,int height,long nowUtcMillis) {
+        return buildTile(s,version,width,height,nowUtcMillis,null);
+    }
+    TileBuilders.Tile buildTile(PetPreviewSnapshot s,String version,int width,int height,long nowUtcMillis,TimeVerifier.Outcome verification) {
         if(s!=null&&(s.committedUtcMillis<PetPreviewSnapshot.MIN_UTC_MILLIS||s.committedUtcMillis>PetPreviewSnapshot.MAX_UTC_MILLIS)){s=null;version="neutral";}
         int side=Math.min(width,height);if(side<192)side=192;
         int frameSide=heroFrame(side),textWidth=rowWidth(frameSide,side);
         ModifiersBuilders.Clickable open=new ModifiersBuilders.Clickable.Builder().setId("open_pet")
             .setOnClick(new ActionBuilders.LaunchAction.Builder().setAndroidActivity(new ActionBuilders.AndroidActivity.Builder()
                 .setPackageName(getPackageName()).setClassName("io.github.projectcetacean.tamaemu.MainActivity").build()).build()).build();
-        String status=s==null?null:s.exceptionalStatus();
+        String status=s==null?null:verification==null?s.exceptionalStatus():s.exceptionalStatus(verification);
         String description=s==null?getString(R.string.tile_neutral):getString(R.string.tile_open_description,
             format("MMM d, yyyy HH:mm",s.committedUtcMillis),status==null?"":", "+status);
         // The two-dp recess surrounds the image; no border or rounded mask covers LCD pixels.

@@ -16,9 +16,13 @@ final class LifeSettingsPanel implements SettingsPanel.Extension {
     interface Listener { void mode(boolean protectedAway); void retry(); }
     private final LifeUiModel model;
     private final Listener listener;
+    private final java.util.function.Supplier<TimeVerifier.Outcome> verification;
     private Button normal, protect, retry;
-    private TextView progress, availability, clock, scheduler, saved;
-    LifeSettingsPanel(LifeUiModel model, Listener listener) { this.model=model;this.listener=listener; }
+    private TextView progress, availability, clock, history, savedWarning, scheduler, saved;
+    LifeSettingsPanel(LifeUiModel model, Listener listener) { this(model,listener,()->TimeVerifier.Outcome.UNAVAILABLE); }
+    LifeSettingsPanel(LifeUiModel model, Listener listener,java.util.function.Supplier<TimeVerifier.Outcome> verification) {
+        this.model=model;this.listener=listener;this.verification=verification;
+    }
     @Override public void append(LinearLayout content) {
         TextView heading=text(content,R.string.life_heading,15);
         UiChrome.heading(heading,false);
@@ -32,7 +36,9 @@ final class LifeSettingsPanel implements SettingsPanel.Extension {
         progress.setTextColor(UiChrome.TEXT);
         availability=text(content,R.string.life_mode_unavailable,12);
         availability.setTextColor(UiChrome.TEXT);
-        clock=text(content,R.string.life_clock_estimated,12);
+        history=text(content,R.string.life_clock_estimated,12);
+        savedWarning=text(content,R.string.life_saved_time_invalid,12);
+        clock=text(content,R.string.life_clock_unavailable,12);
         clock.setTextColor(UiChrome.TEXT);
         scheduler=text(content,R.string.life_scheduler_pending,12);
         scheduler.setTextColor(UiChrome.TEXT);
@@ -52,13 +58,21 @@ final class LifeSettingsPanel implements SettingsPanel.Extension {
         // A rejected request is still useful feedback after the owner settles.
         if(model.modeRejected())availability.setVisibility(View.VISIBLE);
         LifeStatus status=model.status();
-        clock.setVisibility(status!=null&&status.clockQuality!=0?View.VISIBLE:View.GONE);
+        String notice=TimeVerifier.notice(verification.get());
+        clock.setVisibility(status!=null&&notice!=null?View.VISIBLE:View.GONE);
+        if(notice!=null)clock.setText(notice);
+        history.setVisibility(status!=null&&status.clockQuality!=0?View.VISIBLE:View.GONE);
+        boolean invalidSaved=status!=null&&status.lastSuccessfulCommitUtcMs>0
+                &&(status.lastSuccessfulCommitUtcMs<PetPreviewSnapshot.MIN_UTC_MILLIS
+                    ||status.lastSuccessfulCommitUtcMs>PetPreviewSnapshot.MAX_UTC_MILLIS);
+        savedWarning.setVisibility(invalidSaved?View.VISIBLE:View.GONE);
         scheduler.setVisibility(status!=null&&status.schedulingFailed?View.VISIBLE:View.GONE);
         scheduler.setText(R.string.life_scheduling_failed);
         if(status!=null&&status.lastSuccessfulCommitUtcMs>0){
             SimpleDateFormat format=new SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'UTC'",Locale.getDefault());
             format.setTimeZone(TimeZone.getTimeZone("UTC"));
-            saved.setText(context.getString(R.string.life_updated,format.format(new Date(status.lastSuccessfulCommitUtcMs))));
+            String date=format.format(new Date(status.lastSuccessfulCommitUtcMs));
+            saved.setText(context.getString(status.clockQuality!=0?R.string.life_updated_estimated:R.string.life_updated,date));
         }else saved.setText(R.string.life_not_saved);
         retry.setVisibility(retryAvailable(status)?View.VISIBLE:View.GONE);
     }

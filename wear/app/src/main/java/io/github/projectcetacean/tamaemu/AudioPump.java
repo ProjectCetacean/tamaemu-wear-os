@@ -33,6 +33,7 @@ final class AudioPump {
     static final int TARGET_QUEUED_FRAMES=2880;
     static final int MAX_PENDING_FRAMES=9600;
     static final int FRAMES_PER_MS=48;
+    private static final long QUIET_RECOVERY_FRAMES=1000L*FRAMES_PER_MS;
     static final long EXPIRE_MS=250,RETRY_MS=10,REPORT_MS=2000;
 
     private static final class Batch {
@@ -49,12 +50,18 @@ final class AudioPump {
     private final Latency latency=new Latency();
     // lossPending survives a coalesced gain: written track audio predates the loss and must be flushed.
     private boolean active, focused=true, failed, queued, stop, focusDirty, lossPending;
-    private long epoch, activation, sequence, pendingFrames, retryGeneration;
+    private long epoch, activation, sequence, pendingFrames, retryGeneration, retiredFrames;
+    // Same-time partitions form one production observation. Only a later offer finalizes it.
+    private long sourceFrames,offerAt=-1,offerCredit,sourceFloor=Long.MAX_VALUE;
     private final ArrayDeque<Batch> pending=new ArrayDeque<>();
     private Runnable cancelRetry;
     private Output output;
     // Executor only: the current track epoch, reset whenever its buffer is flushed or replaced.
     private long trackWritten, underrunObservedWritten, playedFloor, afterWrite, lastWriteAt, lastReport;
+    // Executor only: accepted-frame quiet proof and the original trustworthy playback phase.
+    private long quietFrom,quietHead=-1,quietAt,quietLow,quietHigh;
+    private long phaseAt=-1,phaseOffset,phaseCredit,phaseRetired;
+    private static final int HEAD_BOUND=240;
     private int inflight;
     private boolean priming=true;
     private int required, writable, route, platformUnderruns=-1;
@@ -78,6 +85,8 @@ final class AudioPump {
     synchronized long offer(long token, short[] samples) {
         if(!accepting()||token!=epoch||samples==null||samples.length==0||samples.length>MAX_PENDING_FRAMES)return -1;
         Batch batch=new Batch(++sequence,now.getAsLong(),samples.clone(),0,samples.length);
+        if(offerAt>=0&&batch.at!=offerAt)sourceFloor=Math.min(sourceFloor,offerCredit);
+        sourceFrames+=samples.length;offerAt=batch.at;offerCredit=sourceFrames-offerAt*FRAMES_PER_MS;
         pending.addLast(batch);pendingFrames+=samples.length;latency.offered(samples.length);
         bound();schedule();
         return batch.sequence;
@@ -85,7 +94,8 @@ final class AudioPump {
     synchronized void invalidate() { epoch++;activation++;discard();stop=true;if(output!=null||queued)schedule(); }
     /** Explicit flushes are counted; a scheduled retry cannot outlive them. */
     private void discard() {
-        latency.flushed(pendingFrames);pending.clear();pendingFrames=0;cancelRetry();latency.discard();
+        sourceFrames=0;offerAt=-1;sourceFloor=Long.MAX_VALUE;
+        latency.flushed(pendingFrames);retiredFrames+=pendingFrames;pending.clear();pendingFrames=0;cancelRetry();latency.discard();
     }
     private void bound() { long over=pendingFrames-MAX_PENDING_FRAMES;if(over>0)latency.dropped(take(over)); }
     private long take(long frames) {
@@ -94,11 +104,11 @@ final class AudioPump {
             Batch head=pending.peekFirst();int n=(int)Math.min(frames-taken,head.remaining());
             head.offset+=n;taken+=n;if(head.remaining()==0)pending.removeFirst();
         }
-        pendingFrames-=taken;return taken;
+        pendingFrames-=taken;retiredFrames+=taken;return taken;
     }
     private void expire(long at) {
         while(!pending.isEmpty()&&at-pending.peekFirst().at>EXPIRE_MS) {
-            Batch old=pending.removeFirst();pendingFrames-=old.remaining();latency.expired(old.remaining());
+            Batch old=pending.removeFirst();pendingFrames-=old.remaining();retiredFrames+=old.remaining();latency.expired(old.remaining());
         }
     }
     private void schedule() {
@@ -124,7 +134,7 @@ final class AudioPump {
         // Invalidate already detached buffers without replacing the focus request.
         epoch++;focused=granted;discard();focusDirty=true;if(!granted)lossPending=true;schedule();
     }
-    private void restartTrack(long at) { trackWritten=0;underrunObservedWritten=0;playedFloor=0;afterWrite=0;lastWriteAt=at;priming=true;required=0;platformUnderruns=-1; }
+    private void restartTrack(long at) { trackWritten=0;underrunObservedWritten=0;playedFloor=0;afterWrite=0;lastWriteAt=at;priming=true;required=0;platformUnderruns=-1;quietFrom=0;quietHead=-1;phaseAt=-1; }
     private void drain() {
         Output old=null,target;long token,activationToken;boolean focusChange,hasFocus,loss,work;
         synchronized(this) {
@@ -179,7 +189,36 @@ final class AudioPump {
         platformUnderruns=count;underrunObservedWritten=trackWritten;
         return increased;
     }
-    /** One grant/occupancy reading per drain. Pending audio waits for room in sequence. */
+    /** A bounded head phase over a whole interval proves played quiet. Millisecond reads
+     * may straddle sample instants; larger backwards jumps and unknown heads fail closed.
+     * One second of played zeros is an eligibility policy, not an acoustic target. */
+    private boolean playedQuiet(long at,long reported,boolean valid) {
+        long head=trackWritten-reported,offset=at*FRAMES_PER_MS-head;
+        boolean backwards=quietHead>=0&&(at<quietAt||head<quietHead-(at==quietAt?FRAMES_PER_MS-1:0));
+        if(backwards){valid=false;phaseAt=-1;}
+        long low=Math.min(quietLow,offset),high=Math.max(quietHigh,offset);
+        if(!valid||quietHead<0||high-low>HEAD_BOUND) {
+            quietFrom=trackWritten;low=high=offset;
+        }
+        quietLow=low;quietHigh=high;
+        quietHead=valid?head:-1;quietAt=at;
+        return valid&&head-quietFrom>=QUIET_RECOVERY_FRAMES;
+    }
+    /** Called under the pump lock, after full writes and a stable second output observation. */
+    private void trimQuiet(long at,long reported) {
+        if(phaseAt<0)return;
+        // Missing production lowers the recoverable playback loss. A current incomplete
+        // offer group can only withhold recovery; it never establishes a lasting deficit.
+        long credit=sourceFrames-at*FRAMES_PER_MS;
+        long missing=Math.max(0,phaseCredit-Math.min(sourceFloor,credit));
+        long debt=at*FRAMES_PER_MS-(trackWritten-reported)-phaseOffset
+                -(retiredFrames-phaseRetired)-missing;
+        if(debt<=0)return;
+        // A tone anywhere in pending vetoes recovery, including one offered during a write.
+        for(Batch batch:pending)for(int i=batch.offset;i<batch.end;i++)if(batch.samples[i]!=0)return;
+        latency.trimmed(take(Math.min(debt,pendingFrames)));
+    }
+    /** Pending audio waits for room in sequence; quiet recovery rechecks the output after writing. */
     private void write(Output target,long token) {
         long at=now.getAsLong();
         // These observations run on the output executor. Invalid grants fail audio, never guest execution.
@@ -203,7 +242,16 @@ final class AudioPump {
         boolean starved=trackWritten>0&&occupancy==0&&played>afterWrite;
         if(changed||platformStarved||known&&starved)priming=true;
         int ceiling=Math.min(writable,priming?Math.max(normalQueueFrames,required):normalQueueFrames);
-        long written=0;boolean first=true;
+        if(changed||!known)phaseAt=-1;
+        boolean recover=playedQuiet(at,reported,known&&!priming&&occupancy>0&&!changed&&!platformStarved);
+        synchronized(this) {
+            long offset=at*FRAMES_PER_MS-(trackWritten-reported);
+            if(known&&!priming&&!changed&&!platformStarved&&phaseAt>=0&&Math.abs(offset-phaseOffset)<=HEAD_BOUND){
+                phaseOffset=Math.max(phaseOffset,offset);
+                if(sourceFloor!=Long.MAX_VALUE)phaseCredit=sourceFloor;
+            }
+        }
+        long written=0;boolean first=true,shortWrite=false;
         while(true) {
             Batch slice;
             synchronized(this) {
@@ -222,9 +270,11 @@ final class AudioPump {
                 inflight=0;
                 boolean restore=epoch==token&&accepting();
                 latency.completed(slice.sequence,slice.offset,accepted,rest,at,known?occupancy+written:-1,!known,restore);
+                // Only accepted samples define the track history; a refused suffix stays pending.
+                for(int i=accepted-1;i>=0;i--)if(slice.samples[slice.offset+i]!=0){quietFrom=trackWritten+written+i+1;break;}
                 written+=accepted;
                 if(rest>0) {
-                    latency.shortWrite(accepted==0);
+                    shortWrite=true;latency.shortWrite(accepted==0);
                     if(restore){pending.addFirst(new Batch(slice.sequence,slice.at,slice.samples,slice.offset+accepted,slice.end));pendingFrames+=rest;bound();}
                     break;
                 }
@@ -234,8 +284,35 @@ final class AudioPump {
         if(written>0) {
             if(starved)latency.underrun();
             trackWritten+=written;afterWrite=occupancy+written;lastWriteAt=at;latency.queued(afterWrite);
-            observeUnderruns(target);
+            boolean underrun=observeUnderruns(target);
+            if(!shortWrite&&!priming&&(recover||phaseAt<0)) {
+                int checkRequired=target.startThresholdFrames(),checkWritable=target.writableFrames(),checkRoute=target.routeId();
+                long checkQueued=target.queuedFrames(),checkAt=now.getAsLong();
+                underrun=observeUnderruns(target)||underrun;
+                boolean stable=!underrun&&checkRequired==required&&checkWritable==writable&&checkRoute==route
+                        &&checkQueued>0&&checkQueued<=trackWritten&&checkAt>=at;
+                if(!stable)phaseAt=-1;
+                boolean quiet=playedQuiet(checkAt,checkQueued,stable);
+                synchronized(this) {
+                    if(stable&&epoch==token&&accepting()) {
+                        // Capture only after a real fill. A proven underrun keeps this reference,
+                        // so its lost playback time remains measurable after quiet refill.
+                        long offset=checkAt*FRAMES_PER_MS-(trackWritten-checkQueued);
+                        if(phaseAt<0){phaseAt=checkAt;phaseOffset=offset;phaseRetired=retiredFrames;
+                            phaseCredit=sourceFloor==Long.MAX_VALUE?offerCredit:sourceFloor;}
+                        // Learn the conservative healthy head envelope before playback loss.
+                        // The source floor is measured from completed timestamp groups, not calls.
+                        if(Math.abs(offset-phaseOffset)<=HEAD_BOUND){
+                            phaseOffset=Math.max(phaseOffset,offset);
+                            if(sourceFloor!=Long.MAX_VALUE)phaseCredit=sourceFloor;
+                        }
+                        if(recover&&quiet)trimQuiet(checkAt,checkQueued);
+                    }
+                }
+            }
+            if(underrun){quietFrom=trackWritten;quietHead=-1;}
         }
+        if(shortWrite){quietFrom=trackWritten;quietHead=-1;}
         // Remaining audio is retried later, never by spinning; expiry ends a refused retry chain.
         synchronized(this){if(epoch==token&&accepting()&&!pending.isEmpty())retry();}
         if(at-lastReport>=REPORT_MS) {
@@ -325,7 +402,7 @@ final class AudioPump {
         synchronized void offered(long n) { offered+=n;pending+=n; }
         synchronized void flushed(long n) { flushed+=n;pending-=n; }
         synchronized void dropped(long n) { dropped+=n;pending-=n; }
-        synchronized void trimmed(long n) { trimmed+=n; }
+        synchronized void trimmed(long n) { trimmed+=n;pending-=n; }
         synchronized void expired(long n) { expired+=n;pending-=n; }
         synchronized void shortWrite(boolean zero) { if(zero)zeroWrites++;else shortWrites++; }
         synchronized void retried() { retries++; }

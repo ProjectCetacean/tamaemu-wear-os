@@ -51,7 +51,7 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         lifeSettings = new LifeSettingsPanel(lifeUi, new LifeSettingsPanel.Listener() {
             @Override public void mode(boolean protectedAway) { changeLifeMode(protectedAway); }
             @Override public void retry() { restart(true); }
-        });
+        }, ((TamaemuApplication)getApplication())::timeOutcome);
         layout = new WatchLayout(this);
         if (state != null) layout.settingsOpen = state.getBoolean("ui.settingsOpen", false);
         if (layout.settingsOpen) layout.createSettings();
@@ -63,7 +63,11 @@ public final class MainActivity extends Activity implements EmulatorSession.List
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("ui.settingsOpen", layout.settingsOpen); super.onSaveInstanceState(state);
     }
-    @Override protected void onResume() { super.onResume(); resumed = true; restart(false); }
+    @Override protected void onResume() {
+        super.onResume(); resumed=true;
+        ((TamaemuApplication)getApplication()).timeOpportunity(()->runOnUiThread(()->{if(resumed)refreshLifeUi();}));
+        restart(false);
+    }
     private void restart(boolean retry) {
         if (!resumed) return;
         state(EmulatorSession.State.LOADING);
