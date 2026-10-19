@@ -4,7 +4,7 @@ A Wear OS port of [maragotchi's Tamaemu](https://github.com/maragotchi/tamaemu),
 
 Supported firmware: Tamagotchi iD L. The watch app requires Android API 26 or later and includes ARM32, ARM64 and x86_64 libraries. Other models and the Windows emulator's connection play are not supported by this port.
 
-Version `0.2.0-wear.10` is unreleased.
+Candidate `0.2.0-wear.11` (version code 11) is unreleased.
 
 ## Firmware
 

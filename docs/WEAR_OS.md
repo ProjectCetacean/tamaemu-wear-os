@@ -1,10 +1,10 @@
 # Tamaemu on Wear OS
 
-Version `0.2.0-wear.10` is unreleased. The app uses compatible, user-supplied iD L firmware; see [release notes](RELEASE_NOTES.md) for current changes.
+Candidate `0.2.0-wear.11` (version code 11) is unreleased. The app uses compatible, user-supplied iD L firmware; see [release notes](RELEASE_NOTES.md) for current changes.
 
 ## Controls and settings
 
-Use the on-screen A/B/C buttons. Hold the display area to open **Settings**; choose **Done** or Back to return. With **Retractable** controls, tap the display area to hide or reveal them. A display gesture during a held A/B/C contact is ignored. Opening Settings or leaving care releases held inputs.
+Use the on-screen A/B/C buttons. Hold the display area to open **Settings**; choose **Done** or Back to return. With **Retractable** controls, tap the display area to hide or reveal them. A display gesture during a held A/B/C contact is ignored. Opening Settings, leaving care or losing window focus releases held inputs. Routine autosaves preserve held A/B/C contacts and minimum press duration through release. A visible disabled button consumes touches without passing them to display gestures.
 
 Settings include:
 
@@ -33,11 +33,13 @@ Catch-up batches idle CPU work and timer comparisons while preserving elapsed ti
 
 Accounting uses elapsed time within a known boot and nonnegative UTC elapsed time across reboot or an unavailable boot clock. Forward clock changes can add aging. Backward changes add no new time and keep existing owed time.
 
-If saving fails, keep the app and its files intact, free storage, then use **Retry**. Recovery after an unconfirmed session returns to the last durable checkpoint and can lose recent input. Do not uninstall or clear app data to resolve a save or recovery problem.
+The app automatically compares current watch UTC with Android's cached network-time estimate opportunistically on API 33 or later. A match removes the actionable clock notice without manual acknowledgment; earlier estimated away time and owed time remain. API 26 through 32, or a missing estimate, show a neutral unavailable status. The estimate does not certify accuracy or guarantee a fresh sync, and the check does not set the pet's clock. Physical API behavior and Tile-host updates still need watch validation.
+
+If saving fails, emulation stays frozen and **Retry** saves the same pending checkpoint. Keep the app and its files intact, free storage, then use **Retry**. A successful background retry clears the session marker only after the checkpoint is durable. Recovery after an unconfirmed session returns to the last durable checkpoint and can lose recent input. Do not uninstall or clear app data to resolve a save or recovery problem.
 
 ## Saved-checkpoint Tile
 
-Add Tamaemu through the watch's Tile picker. The Tile shows the full original LCD from the last verified save. Check its saved time to see how old the image is. Tap it to open the app. The image may show a clock or menu. If no trusted save is available, the Tile shows a message instead.
+Add Tamaemu through the watch's Tile picker. The Tile shows the full original LCD from the last verified save. The saved caption always includes the time and full localized date with year, so a cached layout remains unambiguous across day and year changes. Tap it to open the app. The image may show a clock or menu. If no trusted save is available, the Tile shows a message instead.
 
 The Tile omits the catch-up warning derived from saved debt, which can include a small remainder from closing the app. Protected and clock-check notices remain. Its saved time still describes the checkpoint, not current progress.
 

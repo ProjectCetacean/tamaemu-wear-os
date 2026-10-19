@@ -1,5 +1,16 @@
 # Release notes
 
+## 0.2.0-wear.11, unreleased candidate
+
+- Version code 11. Routine autosaves preserve held A/B/C contacts, minimum press duration and paired release. A failed save freezes emulation; Retry saves the same pending checkpoint.
+- Successful background retry clears the session marker after durable settlement. Visible disabled controls consume touches without activating the display beneath them; losing window focus releases held inputs.
+- The saved-checkpoint Tile always includes saved time and a full localized date with year. It remains a saved preview and does not perform live care.
+- Audio recovery accounts for intentionally absent samples and allows bounded playback-head uncertainty after one second of played silence. Finite host probes preserve the full healthy waveform, notes, gaps and buffer margin; rapid-press sound lag on hardware remains unresolved.
+
+The app automatically compares current watch UTC with Android's cached network-time estimate opportunistically on API 33 or later. A match removes the actionable clock notice without manual acknowledgment; earlier estimated away time and owed time remain. API 26 through 32, or a missing estimate, show a neutral unavailable status. The estimate does not certify accuracy or guarantee a fresh sync, and the check does not set the pet's clock. Physical API behavior and Tile-host updates still need watch validation. Rapid-press sound lag remains unresolved.
+
+Host Java models, Python helpers and standalone Android checks passed; Android Gradle build, lint, fresh APK inspection and watch acceptance remain pending. See [verification](VERIFICATION.md) for scope.
+
 ## 0.2.0-wear.10, unreleased
 
 - Sync upstream through `79e19b6`, including desktop save containers, downloaded-save routing and core corrections.

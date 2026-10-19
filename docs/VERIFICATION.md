@@ -2,6 +2,8 @@
 
 The tests use synthetic inputs and do not require proprietary firmware.
 
+Candidate `0.2.0-wear.11` is unreleased. The full host Java model checks and 152 Python helper tests passed on the combined code candidate. Standalone javac/aapt/Robolectric checks passed all 311 cases across 11 Android test classes, with no failures or ignored cases. These checks do not establish an Android Gradle build, lint, fresh APK inspection or watch acceptance; those remain pending. Automatic cached-time comparison is implemented, but physical API behavior and Tile-host updates remain unverified. Rapid-press sound lag remains unresolved. Earlier migration and CI results below are historical evidence for their named source only.
+
 ## Automated checks
 
 The [Wear workflow](../.github/workflows/wear.yml) runs:
