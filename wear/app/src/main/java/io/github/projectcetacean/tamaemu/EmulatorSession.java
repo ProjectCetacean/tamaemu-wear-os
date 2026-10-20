@@ -35,6 +35,9 @@ final class EmulatorSession {
         int width(long handle);
         int height(long handle);
         void advance(long handle, int elapsed, int[] pixels) throws Exception;
+        default void advanceWithDebt(long handle,int elapsed,int[] pixels,long debtMs) throws Exception {
+            advance(handle,elapsed,pixels);
+        }
         void button(long handle, int button, boolean down);
         boolean save(long handle) throws Exception;
     }

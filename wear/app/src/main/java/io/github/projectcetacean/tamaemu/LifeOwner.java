@@ -311,7 +311,7 @@ final class LifeOwner {
                 for(long release:releaseAtProgress)if(release>progressed)quantum=(int)Math.min(quantum,release-progressed);
                 long afterProgress=Math.addExact(progressed,quantum);
                 if(catching||!foreground)backend.headless(handle,quantum);
-                else backend.advance(handle,quantum,pixels);
+                else backend.advanceWithDebt(handle,quantum,pixels,ledger.debtMs);
                 ledger=LifeLedger.consume(ledger,quantum);progressed=afterProgress;
                 releaseDueButtons();
                 if(catching)publishReplayProgress();else publishStatus();

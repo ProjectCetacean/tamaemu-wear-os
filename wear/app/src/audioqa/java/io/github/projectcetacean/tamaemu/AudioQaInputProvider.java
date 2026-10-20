@@ -14,6 +14,7 @@ import android.os.Bundle;
 public final class AudioQaInputProvider extends ContentProvider implements Application.ActivityLifecycleCallbacks {
     static final String QA_PACKAGE = "io.github.projectcetacean.tamaemu.qoltest";
     private static AudioQaInputProvider instance;
+    private Activity passiveOwner;
     final AudioQaInputDriver driver = new AudioQaInputDriver();
 
     static boolean enabled(Context context) {
@@ -31,11 +32,17 @@ public final class AudioQaInputProvider extends ContentProvider implements Appli
         if (instance != null) instance.driver.command(action);
     }
     @Override public void onActivityResumed(Activity activity) {
-        if (activity.getClass() == MainActivity.class && enabled(activity)) driver.resume((MainActivity) activity);
+        if (activity.getClass() == MainActivity.class && enabled(activity)) {
+            if(passiveOwner!=null&&passiveOwner!=activity)driver.passive.stop("owner_changed");
+            passiveOwner=activity;driver.resume((MainActivity) activity);
+        }
     }
-    @Override public void onActivityPaused(Activity activity) { driver.depart(activity, "pause"); }
-    @Override public void onActivityStopped(Activity activity) { driver.depart(activity, "stop_lifecycle"); }
-    @Override public void onActivityDestroyed(Activity activity) { driver.depart(activity, "destroy"); }
+    private void passiveDeparture(Activity activity,String reason) {
+        if(passiveOwner==activity){driver.passive.stop(reason);passiveOwner=null;}
+    }
+    @Override public void onActivityPaused(Activity activity) { passiveDeparture(activity,"pause");driver.depart(activity, "pause"); }
+    @Override public void onActivityStopped(Activity activity) { passiveDeparture(activity,"stop_lifecycle");driver.depart(activity, "stop_lifecycle"); }
+    @Override public void onActivityDestroyed(Activity activity) { passiveDeparture(activity,"destroy");driver.depart(activity, "destroy"); }
     @Override public void onActivityCreated(Activity activity, Bundle state) { }
     @Override public void onActivityStarted(Activity activity) { }
     @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) { }

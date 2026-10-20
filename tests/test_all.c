@@ -1093,6 +1093,15 @@ static int link_test_hub_port(Link *hub)
     return ok ? ntohs(address.sin_port) : 0;
 }
 
+/* Wait for OS acceptance readiness within the existing one-second test budget. */
+static int link_hub_wait(Link *hub, int expected)
+{
+    uint64_t deadline = link_now_us() + 1000000;
+    while (hub->nsock != expected && link_now_us() < deadline)
+        link_auto_poll(hub);
+    return hub->nsock == expected;
+}
+
 /* Exercise guest-to-guest relay over real non-blocking loopback sockets. */
 static void test_link_hub_relay(void)
 {
@@ -1108,11 +1117,11 @@ static void test_link_hub_relay(void)
 
     char hp[64]; snprintf(hp, sizeof hp, "127.0.0.1:%d", port);
     CHECK(link_join(&g1, hp), "guest 1 connects");
-    CHECK(link_auto_poll(&hub), "hub accepts guest 1");
+    CHECK(link_hub_wait(&hub, 1), "hub accepts guest 1");
     CHECK(hub.listening, "listener stays open after the first guest");
 
     CHECK(link_join(&g2, hp), "guest 2 connects to the same hub");
-    CHECK(link_auto_poll(&hub), "hub accepts guest 2");
+    CHECK(link_hub_wait(&hub, 2), "hub accepts guest 2");
     CHECK(hub.nsock == 2, "hub holds both guests: %d", hub.nsock);
 
     /* The hub sends directly to every guest. */
@@ -1145,7 +1154,7 @@ static void test_link_hub_relay(void)
     link_reset(&g3);
     link_set_tx_byte_us(&g3, 1);
     CHECK(link_join(&g3, hp), "guest 3 connects");
-    CHECK(link_auto_poll(&hub), "hub accepts guest 3");
+    CHECK(link_hub_wait(&hub, 3), "hub accepts guest 3");
     CHECK(hub.nsock == 3, "hub holds three guests: %d", hub.nsock);
 
     link_tx(&g3, 0, 0xD4);

@@ -263,11 +263,14 @@ static int advance_execution(WearBackend *b,int ms,int audible,char error[160]) 
     unsigned steps=0;
     if(audible) audio_observe(b);
     while(e->emu_secs<until && !e->stopped && steps++<10000000) {
+        double clock=e->cmu.mclk_hz;
         unsigned idle=e->halted?cpu_skip_idle(e,10000001-steps):0;
         if(idle) steps+=idle-1;else cpu_step(e);
         if(audible && (e->tone_ev_w!=b->audio.read || e->cmu.mclk_hz!=b->audio.clock_raw)) audio_observe(b);
-        if(e->cycles-e->last_tick>=256) {
-            periph_tick(e,(uint32_t)(e->cycles-e->last_tick));e->last_tick=e->cycles;
+        /* The changing instruction belongs to the old clock segment. Flush
+         * it before the next instruction, leaving no unpersisted time carry. */
+        if(e->cmu.mclk_hz!=clock || e->cycles-e->last_tick>=256) {
+            periph_tick_at(e,(uint32_t)(e->cycles-e->last_tick),clock>0?clock:e->dev.osc3_hz);e->last_tick=e->cycles;
             periph_buttons(e,e->btn_mask);
         }
     }

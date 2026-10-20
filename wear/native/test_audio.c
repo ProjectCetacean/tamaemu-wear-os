@@ -134,6 +134,79 @@ static void exact_state_and_restore(void) {
     step(c,0);CHECK(wear_audio_drain(c,pcm,9600)==0,"restored zero-time frame is silent");step(a,11);step(c,11);equal(a,c,"audio continuation retains full canonical state");
     wear_close(a);wear_close(b);wear_close(c);
 }
+/* N1: a clock-changing store itself still runs at the previous Hz.
+ * This one-cycle program gives an analytic integral independent of RTC/audio. */
+static WearBackend *clock_loop(int mode) {
+    WearBackend *b=fresh();Emu *e=(Emu *)wear_state(b);
+    periph_write32(e,0x301b24,0x96);periph_write32(e,0x301b08,mode==2?0x1004:4);
+    uint16_t words[256]={0};words[0]=0x3c34;words[128]=0x3c35;words[255]=0x0686;
+    e->r[3]=0x301b08;e->r[4]=mode==1?0x1004:4;e->r[5]=mode==2?0x1004:4;e->r[6]=0x02400100;
+    program(e,words,256);timer(e,1);return b;
+}
+static double clock_integral(uint64_t cycles,int mode) {
+    if(!cycles)return 0;
+    double first=mode==2?16384:32768,next=mode==1?16384:32768;
+    uint64_t rest=cycles-1,tail=rest%256;
+    return 1/first+(rest/256)*(128/next+128/first)
+        +(tail<128?tail/next:128/next+(tail-128)/first);
+}
+static void clock_time_and_pacing(int mode) {
+    WearBackend *a=clock_loop(mode),*b=clock_loop(mode),*c=clock_loop(mode);
+    CHECK(wear_audio_set_enabled(a,1),"clock integral audio enabled");
+    const int ms[]={1,10,16,33,1000,0,1,7,100,10,1,1};
+    double requested=0;long total=0;uint64_t sample_hash=14695981039346656037ULL;
+    for(size_t i=0;i<sizeof ms/sizeof *ms;i++) {
+        step(a,ms[i]);step(b,ms[i]);CHECK(wear_advance_headless(c,ms[i],error),"clock integral headless step");
+        const Emu *e=wear_state(a);double expected=clock_integral(e->cycles,mode);
+        requested+=(ms[i]>100?100:ms[i])/1000.0;
+        CHECK(fabs(e->emu_secs-expected)<1e-10,"N1 guest time equals pre-instruction clock integral");
+        CHECK(expected-requested>=-1e-10 && expected-requested<=256.0/16384+1e-10,"N1 one cumulative deadline quantum, no per-call credit");
+        size_t n=wear_audio_drain(a,pcm,9600);CHECK(n<9600,"clock integral has no ring discard");total+=(long)n;
+        CHECK(labs(total-(long)floor(expected*48000+1e-7))<=1,"N1 PCM retains independent segment time");
+        for(size_t j=0;j<n;j++){sample_hash^=(uint16_t)pcm[j];sample_hash*=1099511628211ULL;}
+        equal(a,b,"N1 source audio on/off canonical twins");equal(a,c,"N1 headless canonical twin");
+    }
+    uint8_t before[32],after[32];wear_state_digest(a,before);
+    CHECK(!wear_advance(a,-1,frame,PANEL_W*PANEL_H,error),"N1 negative request rejected");
+    wear_state_digest(a,after);CHECK(!memcmp(before,after,32),"N1 rejection preserves carried deadline and guest");
+    printf("N1_CLOCK mode=%d cycles=%llu seconds=%.12f frames=%ld pcm_hash=%016llx state=",mode,
+        (unsigned long long)wear_state(a)->cycles,wear_state(a)->emu_secs,total,(unsigned long long)sample_hash);
+    for(size_t i=0;i<sizeof before;i++)printf("%02x",before[i]);puts("");
+    wear_close(a);wear_close(b);wear_close(c);
+}
+static void clock_boundary(unsigned at,int idle) {
+    unsigned saved_serial=serial;WearBackend *a=fresh();Emu *e=(Emu *)wear_state(a);
+    double old_hz=at==256?32768:16384;
+    periph_write32(e,0x301b24,0x96);periph_write32(e,0x301b08,at==256?4:0x1004);
+    uint16_t words[257]={0};unsigned store=idle?0:at-1;words[store]=0x3c34;words[store+1]=0x0080;
+    e->r[3]=0x301b08;e->r[4]=at==256?0x1004:4;program(e,words,store+2);
+    if(idle){e->halted=true;e->halt_hard=false;e->wake_at=256;}
+    /* T1 prescaler /64 with compares beyond this test: count raw cycles. */
+    periph_write8(e,0x300788,254);periph_write8(e,0x300789,255);
+    periph_write8(e,0x30078a,255);periph_write8(e,0x30078b,255);
+    periph_write8(e,0x3007e2,12);periph_write8(e,0x30078e,1);
+    CHECK(wear_audio_set_enabled(a,1),"boundary audio enabled");step(a,1);
+    uint64_t expected_cycles=idle?257:at;
+    CHECK(e->cycles==expected_cycles && e->last_tick==e->cycles,"N1 stops at completed clock-change boundary");
+    CHECK(fabs(e->emu_secs-expected_cycles/old_hz)<1e-12,"N1 boundary charges old Hz including changing instruction");
+    CHECK(fabs(e->rtc_sec_frac-e->emu_secs)<1e-12,"N1 RTC shares corrected seconds");
+    CHECK(fabs(e->rtc_irq_frac-fmod(e->emu_secs,1.0/64))<1e-12,"N1 cyclic RTC shares corrected seconds");
+    CHECK(e->t16[1].counter==expected_cycles/64 && e->t16[1].accum==expected_cycles%64,"N1 T16 counts raw cycles across flush");
+    CHECK(labs((long)wear_audio_drain(a,pcm,9600)-(long)floor(expected_cycles*48000/old_hz))<=1,"N1 boundary PCM duration");
+    CHECK(wear_save(a,error),"N1 immediate post-change synthetic save");
+    char save[512];snprintf(save,sizeof save,"%s/pet-%u.state",dir,saved_serial);
+    WearBackend *b=wear_open(rom,save,error);CHECK(b!=NULL,"N1 post-change save restores");
+    equal(a,b,"N1 post-change restore retains all guest and deadline state");
+    CHECK(wear_audio_set_enabled(b,1),"N1 restored audio enabled");CHECK(wear_audio_drain(b,pcm,9600)==0,"N1 no persisted PCM carry");
+    const int ms[]={0,1,7,33,100};
+    for(size_t i=0;i<sizeof ms/sizeof *ms;i++) {
+        step(a,ms[i]);step(b,ms[i]);equal(a,b,"N1 post-change restored continuation");
+        size_t na=wear_audio_drain(a,pcm,9600),nb=wear_audio_drain(b,pcm,9600);
+        CHECK(labs((long)na-(long)nb)<=1,"N1 restored PCM count within one runtime fraction");
+        CHECK(e->t16[1].counter==e->cycles/64 && e->t16[1].accum==e->cycles%64,"N1 T16 raw cycles continue after idle");
+    }
+    wear_close(a);wear_close(b);
+}
 static void supplied_rom(const char *file) {
     char left[512],right[512];snprintf(left,sizeof left,"%s/rom-audio.state",dir);snprintf(right,sizeof right,"%s/rom-silent.state",dir);
     WearBackend *a=wear_open(file,left,error),*b=wear_open(file,right,error);CHECK(a&&b,"supplied local ROM pair opens");
@@ -161,6 +234,8 @@ int main(int argc,char **argv) {
     image[0x400001]=1;image[0x400002]=0x40;image[0x400003]=2;image[0x400100]=0x80;
     FILE *f=fopen(rom,"wb");CHECK(f&&fwrite(image,1,8388608,f)==8388608&&fclose(f)==0,"audio ROM fixture");free(image);
     frequency_and_edges();high_clock_tone();short_edges_in_one_slice();clock_segments();partition_and_overflow();low_clock_work_bound();suppression_and_validation();exact_state_and_restore();
+    clock_time_and_pacing(0);clock_time_and_pacing(1);clock_time_and_pacing(2);
+    clock_boundary(32,0);clock_boundary(256,0);clock_boundary(257,1);
     if(argc>1)supplied_rom(argv[1]);
     printf("PASS: %u native audio checks\n",checks);return 0;
 }

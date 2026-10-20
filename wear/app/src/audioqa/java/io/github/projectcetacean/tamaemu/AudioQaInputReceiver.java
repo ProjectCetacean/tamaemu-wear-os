@@ -15,7 +15,7 @@ public final class AudioQaInputReceiver extends BroadcastReceiver {
                 || intent.getData()!=null || intent.getClipData()!=null || intent.getSelector()!=null
                 || intent.getCategories()!=null || (intent.getExtras()!=null && !intent.getExtras().isEmpty())) return;
         String action = intent.getAction();
-        if ("singles".equals(action) || "same-c".equals(action) || "abc".equals(action) || "track-contract".equals(action) || "stop".equals(action))
+        if ("singles".equals(action) || "same-c".equals(action) || "abc".equals(action) || "track-contract".equals(action) || "stop".equals(action) || "passive-scalars".equals(action) || "passive-stop".equals(action))
             AudioQaInputProvider.command(action);
     }
 }

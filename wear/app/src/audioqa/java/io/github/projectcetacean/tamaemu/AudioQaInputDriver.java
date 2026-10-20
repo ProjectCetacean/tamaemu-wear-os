@@ -18,6 +18,7 @@ import java.util.Set;
 
 /** Finite process-owned contacts in the current QA decor. No global input injection. */
 final class AudioQaInputDriver {
+    final AudioQaInputPassiveScalars passive = new AudioQaInputPassiveScalars();
     final AudioQaInputTrackProbe probe = new AudioQaInputTrackProbe();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Set<String> used = new HashSet<>();
@@ -49,6 +50,8 @@ final class AudioQaInputDriver {
     void command(String action) {
         // BroadcastReceiver and lifecycle callbacks are main-thread callbacks. No queued command can revive a run.
         if (Looper.myLooper() != Looper.getMainLooper()) return;
+        if ("passive-scalars".equals(action)) { passive.begin(); return; }
+        if ("passive-stop".equals(action)) { passive.stop("explicit_stop"); return; }
         if ("stop".equals(action)) { abort("explicit_stop"); probe.cancel(); return; }
         if ("track-contract".equals(action)) {
             if (root!=null || !probe.begin(resumed.get())) declined(action);

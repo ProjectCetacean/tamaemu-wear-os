@@ -9,6 +9,48 @@ import java.util.function.LongSupplier;
 /** Detached PCM only. All output calls run on one executor, never the guest worker.
  *  Pending batches stay ordered and bounded; only startup/refill may exceed the normal target. */
 final class AudioPump {
+    /** Optional scalar-only sink. Implementations must be bounded and never call owners.
+     * Each pump binds once at construction; a late registration cannot reconstruct history. */
+    interface PassiveObserver {
+        int CONFIGURE_ON=1, CONFIGURE_OFF=2, INVALIDATE=3, FOCUS_GAIN=4, FOCUS_LOSS=5;
+        int TRACK_START=1, TRACK_FLUSH=2, TRACK_STOP=3;
+        int GRANT_CHANGE=1, COUNTER_DISCONTINUITY=2, COUNTER_ADVANCE=3,
+                RAW_HEAD_INVALID=4, QUIET_BACKWARDS=5, BOUND_CONTRADICTION=6,
+                UNKNOWN_HEAD=7, UNSTABLE_FILL=8, TRACK_RESET=9, DELAYED_HEAD=10, KNOWN_EMPTY=11;
+        long UNAVAILABLE=-1;
+        default PassiveObserver bind() { return this; }
+        default void epoch(long token,int reason) {}
+        default void track(long token,int reason) {}
+        default void acceptedOffer(long token,long debtMs) {}
+        default void stablePhase(long token,long pendingFrames) {}
+        default void headLag(long token,long frames) {}
+        /** Presence bits: phase=1, refill=2, playback bound=4. Normal refill consumption is excluded. */
+        default void references(long token,int cause,int before,int after) {}
+        default void summary(long token,Summary totals,int sampledPlatformUnderruns) {}
+    }
+    private static volatile PassiveObserver passiveRegistration;
+    static synchronized boolean registerPassiveObserver(PassiveObserver observer) {
+        if(observer==null||passiveRegistration!=null)return false;
+        passiveRegistration=observer;return true;
+    }
+    static synchronized void removePassiveObserver(PassiveObserver observer) {
+        if(passiveRegistration==observer)passiveRegistration=null;
+    }
+    private final PassiveObserver passiveOwner,passiveSink;
+    private PassiveObserver passive() { return passiveRegistration==passiveOwner?passiveSink:null; }
+    private void passiveEpoch(int reason) {
+        PassiveObserver o=passive();if(o!=null)try{o.epoch(epoch,reason);}catch(Throwable ignored){}
+    }
+    private void passiveTrack(long token,int reason) {
+        PassiveObserver o=passive();if(o!=null)try{o.track(token,reason);}catch(Throwable ignored){}
+    }
+    private int referenceMask() { return (phaseAt>=0?1:0)|(refillHead>=0?2:0)|(playbackBound?4:0); }
+    private void passiveReferences(long token,int cause,int before) {
+        PassiveObserver o=passive();if(o!=null)try{o.references(token,cause,before,referenceMask());}catch(Throwable ignored){}
+    }
+    private void passiveOffer(long token,long debt) {
+        PassiveObserver o=passive();if(o!=null)try{o.acceptedOffer(token,debt);}catch(Throwable ignored){}
+    }
     interface Focus { void changed(boolean granted); }
     interface Output {
         boolean start(Focus focus);
@@ -69,6 +111,10 @@ final class AudioPump {
     // Executor only: accepted-frame quiet proof and the original trustworthy playback phase.
     private long quietFrom,quietHead=-1,quietAt;
     private boolean counterContinuous;
+    // Unlike quietHead, raw history survives unknown occupancy behind the proven floor.
+    // Strict history is required only for references retained beyond the old bounded path.
+    private long rawHead=-1,rawHeadAt;
+    private boolean retainedLagReference;
     private long phaseAt=-1,phaseOffset,phaseCredit,phaseRetired;
     // Learn head uncertainty only while this reference has had uninterrupted playback.
     private boolean phaseFrozen;
@@ -89,11 +135,15 @@ final class AudioPump {
         if(normalQueueFrames!=1440&&normalQueueFrames!=1920&&normalQueueFrames!=2880)
             throw new IllegalArgumentException("Normal audio queue must be 1440, 1920 or 2880 frames");
         this.executor=executor;this.delay=delay;this.now=now;this.factory=factory;this.normalQueueFrames=normalQueueFrames;
+        passiveOwner=passiveRegistration;
+        PassiveObserver sink=null;
+        if(passiveOwner!=null)try{sink=passiveOwner.bind();}catch(Throwable ignored){}
+        passiveSink=sink;
     }
     Latency latency() { return latency; }
     synchronized void configure(boolean value) {
         if(active==value)return;
-        active=value;epoch++;activation++;discard();stop=true;focused=true;failed=false;
+        active=value;epoch++;passiveEpoch(value?PassiveObserver.CONFIGURE_ON:PassiveObserver.CONFIGURE_OFF);activation++;discard();stop=true;focused=true;failed=false;
         if(output!=null||queued)schedule();
     }
     synchronized boolean accepting() { return active&&focused&&!failed; }
@@ -102,14 +152,17 @@ final class AudioPump {
     synchronized long offer(long token, short[] samples) {
         if(!accepting()||token!=epoch)return -1;
         producerValid=false;
-        return enqueue(samples);
+        return enqueue(token,samples,PassiveObserver.UNAVAILABLE);
     }
     /** One positive logical request returned normally. This does not claim hidden native PCM.
      * The literal detached array is the only production credited to transport. */
     synchronized long offerCompletedAdvance(long token,long cumulativeAudibleLogicalMs,short[] samples) {
+        return offerCompletedAdvance(token,cumulativeAudibleLogicalMs,samples,PassiveObserver.UNAVAILABLE);
+    }
+    synchronized long offerCompletedAdvance(long token,long cumulativeAudibleLogicalMs,short[] samples,long debtMs) {
         if(!accepting()||token!=epoch)return -1;
         if(samples==null||samples.length>MAX_PENDING_FRAMES||cumulativeAudibleLogicalMs<=completedMs){
-            producerValid=false;return enqueue(samples);
+            producerValid=false;return enqueue(token,samples,debtMs);
         }
         try {
             long logical=Math.multiplyExact(cumulativeAudibleLogicalMs,(long)FRAMES_PER_MS);
@@ -123,17 +176,17 @@ final class AudioPump {
             sourceCredit=Math.subtractExact(logical,Math.multiplyExact(now.getAsLong(),(long)FRAMES_PER_MS));
             if(samples.length==MAX_PENDING_FRAMES)producerValid=false; // drain may still be saturated
         } catch(ArithmeticException overflow){producerValid=false;}
-        return enqueue(samples);
+        return enqueue(token,samples,debtMs);
     }
-    private long enqueue(short[] samples) {
+    private long enqueue(long token,short[] samples,long debtMs) {
         if(samples==null||samples.length==0||samples.length>MAX_PENDING_FRAMES)return -1;
         Batch batch=new Batch(++sequence,now.getAsLong(),samples.clone(),0,samples.length);
         pending.addLast(batch);pendingFrames+=samples.length;latency.offered(samples.length);
-        bound();schedule();return batch.sequence;
+        bound();passiveOffer(token,debtMs);schedule();return batch.sequence;
     }
     /** Retire only the abandoned producer, atomically with focus epoch changes. */
     synchronized void invalidate(long token) { if(epoch==token)invalidate(); }
-    synchronized void invalidate() { epoch++;activation++;discard();stop=true;if(output!=null||queued)schedule(); }
+    synchronized void invalidate() { epoch++;passiveEpoch(PassiveObserver.INVALIDATE);activation++;discard();stop=true;if(output!=null||queued)schedule(); }
     /** Explicit flushes are counted; a scheduled retry cannot outlive them. */
     private void discard() {
         sourceFrames=0;completedMs=0;sourceCredit=0;missingPcm=0;producerSeen=false;producerValid=true;
@@ -187,9 +240,9 @@ final class AudioPump {
     private synchronized void focus(long token,boolean granted) {
         if(token!=activation||!active||failed)return;
         // Invalidate already detached buffers without replacing the focus request.
-        epoch++;focused=granted;discard();focusDirty=true;if(!granted)lossPending=true;schedule();
+        epoch++;passiveEpoch(granted?PassiveObserver.FOCUS_GAIN:PassiveObserver.FOCUS_LOSS);focused=granted;discard();focusDirty=true;if(!granted)lossPending=true;schedule();
     }
-    private void restartTrack(long at) { coalesceEndpoint=-1;coalesceUntil=-1;trackWritten=0;underrunObservedWritten=0;playedFloor=0;afterWrite=0;lastWriteAt=at;priming=true;required=0;platformUnderruns=-1;counterContinuous=false;quietFrom=0;quietHead=-1;phaseAt=-1;refillHead=0;playbackBound=false; }
+    private void restartTrack(long at,long token,int reason) { int before=referenceMask();rawHead=-1;rawHeadAt=at;retainedLagReference=false;coalesceEndpoint=-1;coalesceUntil=-1;trackWritten=0;underrunObservedWritten=0;playedFloor=0;afterWrite=0;lastWriteAt=at;priming=true;required=0;platformUnderruns=-1;counterContinuous=false;quietFrom=0;quietHead=-1;phaseAt=-1;refillHead=0;playbackBound=false;passiveReferences(token,PassiveObserver.TRACK_RESET,before);passiveTrack(token,reason); }
     private void drain() {
         Output old=null,target;long token,activationToken;boolean focusChange,hasFocus,loss,work;
         synchronized(this) {
@@ -200,8 +253,8 @@ final class AudioPump {
             focusChange=focusDirty;focusDirty=false;hasFocus=focused;loss=lossPending;lossPending=false;
         }
         try {
-            if(old!=null)old.stop();
-            if(target!=null&&loss){target.suspend();restartTrack(now.getAsLong());}
+            if(old!=null){old.stop();passiveTrack(token,PassiveObserver.TRACK_STOP);}
+            if(target!=null&&loss){target.suspend();restartTrack(now.getAsLong(),token(),PassiveObserver.TRACK_FLUSH);}
             if(target!=null&&focusChange&&hasFocus)target.resume();
             if(!work)return;
             if(target==null) {
@@ -209,7 +262,7 @@ final class AudioPump {
                 synchronized(this){
                     if(activation!=activationToken||!active||failed){old=target;target=null;}
                 }
-                if(target==null){old.stop();return;}
+                if(target==null){old.stop();passiveTrack(token(),PassiveObserver.TRACK_STOP);return;}
                 final long focusToken=activationToken;
                 if(!target.start(granted->focus(focusToken,granted)))
                     throw new IllegalStateException("Audio output start unavailable");
@@ -219,8 +272,8 @@ final class AudioPump {
                     if(activation==activationToken&&active&&!failed)output=target;
                     else{old=target;target=null;}
                 }
-                if(target==null){old.stop();return;}
-                long at=now.getAsLong();restartTrack(at);lastReport=at;
+                if(target==null){old.stop();passiveTrack(token(),PassiveObserver.TRACK_STOP);return;}
+                long at=now.getAsLong();restartTrack(at,token(),PassiveObserver.TRACK_START);lastReport=at;
             }
             synchronized(this){if(epoch!=token||!accepting())return;}
             write(target,token);
@@ -231,39 +284,58 @@ final class AudioPump {
             }
             if(target!=null){
                 try{target.reportFailure(latency.summary());}catch(RuntimeException|LinkageError ignored){}
-                try{target.stop();}catch(RuntimeException|LinkageError ignored){}
+                try{target.stop();passiveTrack(token(),PassiveObserver.TRACK_STOP);}catch(RuntimeException|LinkageError ignored){}
             }
         }
     }
-    private boolean observeUnderruns(Output target) {
+    private boolean observeUnderruns(Output target,long token) {
         int count=target.underrunCount();
         counterContinuous=count>=0&&count<Integer.MAX_VALUE&&platformUnderruns>=0
                 &&platformUnderruns<Integer.MAX_VALUE&&count>=platformUnderruns;
         boolean increased=counterContinuous&&count>platformUnderruns;
         if(!counterContinuous){
+            int before=referenceMask();
+            if(retainedLagReference){phaseAt=-1;retainedLagReference=false;}
             quietFrom=trackWritten;quietHead=-1;playbackBound=false;refillHead=-1;
+            passiveReferences(token,PassiveObserver.COUNTER_DISCONTINUITY,before);
         }
         // Only writes preceding the previous observation are proven consumed. An underrun
         // may happen between our occupancy read and a write accepting a fresh prefix.
         if(increased){
+            int before=referenceMask();
             playedFloor=Math.max(playedFloor,underrunObservedWritten);priming=true;phaseFrozen=true;
             playbackBound=false;
             // A count observed after accepting a fresh prefix cannot locate the stopped head.
             refillHead=playedFloor==trackWritten?trackWritten:-1;
+            passiveReferences(token,PassiveObserver.COUNTER_ADVANCE,before);
         }
         platformUnderruns=count;underrunObservedWritten=trackWritten;
         return increased;
+    }
+    /** Retention never turns an inferred floor into head evidence, even on the next read. */
+    private boolean observeRawHead(long at,long reported,long token) {
+        boolean valid=reported>=0&&reported<=trackWritten;
+        long head=valid?trackWritten-reported:-1;
+        boolean monotone=valid&&(rawHead<0||at>=rawHeadAt&&head>=rawHead);
+        if(retainedLagReference&&!monotone){
+            int before=referenceMask();
+            phaseAt=-1;playbackBound=false;refillHead=-1;retainedLagReference=false;
+            quietFrom=trackWritten;quietHead=-1;
+            passiveReferences(token,PassiveObserver.RAW_HEAD_INVALID,before);
+        }
+        rawHead=head;rawHeadAt=at;
+        return monotone;
     }
     /** A delayed, monotone head proves consumption of the accepted zero span itself.
      * Stable epoch/grant and an unsaturated underrun counter exclude an unseen restart.
      * Sub-ms read ordering needs a separate 47-frame clock-granularity margin.
      * The current head minus that margin proves consumed zeros, without a head-delay bound. */
-    private boolean playedQuiet(long at,long reported,boolean valid) {
+    private boolean playedQuiet(long at,long reported,boolean valid,long token) {
         long head=trackWritten-reported,offset=at*FRAMES_PER_MS-head;
         valid=valid&&counterContinuous;
         boolean backwards=quietHead>=0&&(at<quietAt||head<quietHead-(at==quietAt?FRAMES_PER_MS-1:0));
-        if(backwards){valid=false;phaseAt=-1;playbackBound=false;refillHead=-1;}
-        if(valid&&playbackBound&&offset<playbackOffsetLower-(FRAMES_PER_MS-1))playbackBound=false;
+        if(backwards){int before=referenceMask();valid=false;phaseAt=-1;playbackBound=false;refillHead=-1;passiveReferences(token,PassiveObserver.QUIET_BACKWARDS,before);}
+        if(valid&&playbackBound&&offset<playbackOffsetLower-(FRAMES_PER_MS-1)){int before=referenceMask();playbackBound=false;passiveReferences(token,PassiveObserver.BOUND_CONTRADICTION,before);}
         if(!valid||quietHead<0)quietFrom=trackWritten;
         quietHead=valid?head:-1;quietAt=at;
         return valid&&head-(FRAMES_PER_MS-1)-quietFrom>=QUIET_RECOVERY_FRAMES;
@@ -295,11 +367,12 @@ final class AudioPump {
         if(nextRequired<1||nextRequired>MAX_PENDING_FRAMES||nextWritable<nextRequired)
             throw new IllegalStateException("Unreachable audio start threshold");
         boolean changed=nextRequired!=required||nextWritable!=writable||nextRoute!=route;
-        if(changed&&required!=0){playbackBound=false;refillHead=-1;}
-        boolean platformStarved=observeUnderruns(target);
+        if(changed&&required!=0){int before=referenceMask();playbackBound=false;refillHead=-1;retainedLagReference=false;passiveReferences(token,PassiveObserver.GRANT_CHANGE,before);}
+        boolean platformStarved=observeUnderruns(target,token);
         required=nextRequired;writable=nextWritable;route=nextRoute;
         if(changed||platformStarved)priming=true;
         long reported=target.queuedFrames();
+        boolean monotoneHead=observeRawHead(at,reported,token);
         boolean known=reported>=0&&reported<=trackWritten;
         long played=Math.max(0,at-lastWriteAt)*FRAMES_PER_MS;
         // Before a verified real fill, elapsed time is not evidence that playback has started.
@@ -308,15 +381,24 @@ final class AudioPump {
         // prefixes, and exclude this inferred occupancy from onset timing.
         boolean boundedUnderrunHead=known&&trackWritten-reported<playedFloor
                 &&playedFloor-(trackWritten-reported)<=HEAD_BOUND;
-        if(known&&trackWritten-reported<playedFloor){occupancy=trackWritten-playedFloor;known=false;}
+        boolean retainReferences=known&&trackWritten-reported<playedFloor
+                &&monotoneHead&&counterContinuous&&!changed;
+        if(retainReferences&&!boundedUnderrunHead)retainedLagReference=true;
+        if(known&&trackWritten-reported<playedFloor){
+            PassiveObserver o=passive();if(o!=null)try{o.headLag(token,playedFloor-(trackWritten-reported));}catch(Throwable ignored){}
+            occupancy=trackWritten-playedFloor;known=false;}
         else if(platformStarved&&!known)occupancy=Math.min(occupancy,trackWritten-playedFloor);
         boolean starved=trackWritten>0&&occupancy==0&&played>afterWrite;
-        if(known&&starved){refillHead=trackWritten;playbackBound=false;phaseFrozen=true;}
+        if(known&&starved){int before=referenceMask();refillHead=trackWritten;playbackBound=false;phaseFrozen=true;passiveReferences(token,PassiveObserver.KNOWN_EMPTY,before);}
         if(changed||platformStarved||known&&starved)priming=true;
         int ceiling=Math.min(writable,priming?Math.max(normalQueueFrames,required):normalQueueFrames);
-        if(changed||!known&&!boundedUnderrunHead)phaseAt=-1;
-        if(!known&&!boundedUnderrunHead){playbackBound=false;refillHead=-1;}
-        boolean recover=playedQuiet(at,reported,known&&!priming&&occupancy>0&&!changed&&!platformStarved);
+        int beforeReferences=referenceMask();
+        if(changed||!known&&!boundedUnderrunHead&&!retainReferences)phaseAt=-1;
+        if(!known&&!boundedUnderrunHead&&!retainReferences){playbackBound=false;refillHead=-1;retainedLagReference=false;}
+        if(changed||!known&&!boundedUnderrunHead&&!retainReferences)
+            passiveReferences(token,changed?PassiveObserver.GRANT_CHANGE:PassiveObserver.UNKNOWN_HEAD,beforeReferences);
+        else if(retainReferences)passiveReferences(token,PassiveObserver.DELAYED_HEAD,beforeReferences);
+        boolean recover=playedQuiet(at,reported,known&&!priming&&occupancy>0&&!changed&&!platformStarved,token);
         synchronized(this) {
             long offset=at*FRAMES_PER_MS-(trackWritten-reported);
             if(known&&!priming&&!changed&&!platformStarved&&phaseAt>=0&&!phaseFrozen&&Math.abs(offset-phaseOffset)<=HEAD_BOUND){
@@ -389,22 +471,29 @@ final class AudioPump {
         if(written>0) {
             if(starved)latency.underrun();
             trackWritten+=written;afterWrite=occupancy+written;lastWriteAt=at;latency.queued(afterWrite);
-            boolean underrun=observeUnderruns(target);
+            boolean underrun=observeUnderruns(target,token);
             if(!shortWrite&&!priming&&(recover||phaseAt<0)) {
                 int checkRequired=target.startThresholdFrames(),checkWritable=target.writableFrames(),checkRoute=target.routeId();
                 long checkQueued=target.queuedFrames(),checkAt=now.getAsLong();
-                underrun=observeUnderruns(target)||underrun;
+                observeRawHead(checkAt,checkQueued,token);
+                underrun=observeUnderruns(target,token)||underrun;
                 boolean stable=!underrun&&checkRequired==required&&checkWritable==writable&&checkRoute==route
                         &&checkQueued>0&&checkQueued<=trackWritten&&checkAt>=at;
-                if(!stable)phaseAt=-1;
-                boolean quiet=playedQuiet(checkAt,checkQueued,stable);
+                if(!stable){
+                    int before=referenceMask();phaseAt=-1;
+                    if(retainedLagReference){playbackBound=false;refillHead=-1;retainedLagReference=false;}
+                    passiveReferences(token,PassiveObserver.UNSTABLE_FILL,before);
+                }
+                boolean quiet=playedQuiet(checkAt,checkQueued,stable,token);
                 synchronized(this) {
                     if(stable&&epoch==token&&accepting()) {
                         // Capture only after a real fill. A proven underrun keeps this reference,
                         // so its lost playback time remains measurable after quiet refill.
                         long offset=checkAt*FRAMES_PER_MS-(trackWritten-checkQueued);
                         if(phaseAt<0){phaseAt=checkAt;phaseOffset=offset;phaseRetired=retiredFrames;
-                            phaseCredit=sourceCredit;phaseFrozen=false;}
+                            phaseCredit=sourceCredit;phaseFrozen=false;
+                            PassiveObserver o=passive();if(o!=null)try{o.stablePhase(token,pendingFrames);}catch(Throwable ignored){}
+                        }
                         // Learn the conservative healthy head envelope before playback loss.
                         // An underrun freezes this reference even when its loss fits HEAD_BOUND.
                         // Only matched completed requests may establish source progress.
@@ -423,6 +512,7 @@ final class AudioPump {
         synchronized(this){if(epoch==token&&accepting()&&!pending.isEmpty())retry();}
         if(at-lastReport>=REPORT_MS) {
             lastReport=at;
+            PassiveObserver o=passive();if(o!=null)try{o.summary(token,latency.summary(),platformUnderruns);}catch(Throwable ignored){}
             try{target.report(latency.summary());}catch(RuntimeException|LinkageError ignored){ /* Telemetry never affects audio. */ }
         }
     }

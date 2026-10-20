@@ -52,6 +52,9 @@ final class AudioBackend implements EmulatorSession.Backend {
     public int width(long handle){return guest.width(handle);}
     public int height(long handle){return guest.height(handle);}
     public void advance(long handle,int elapsed,int[] pixels)throws Exception {
+        advanceWithDebt(handle,elapsed,pixels,AudioPump.PassiveObserver.UNAVAILABLE);
+    }
+    public void advanceWithDebt(long handle,int elapsed,int[] pixels,long debtMs)throws Exception {
         AudioPump pump=currentPump();long token=pump==null?0:pump.token();
         boolean audible=elapsed>0&&pump!=null&&pump.accepting();
         if(elapsed>0&&!enabled(handle,audible)){
@@ -73,7 +76,7 @@ final class AudioBackend implements EmulatorSession.Backend {
                 resetProducer();producerPump=pump;producerToken=token;
             }
             audibleCompletedMs=Math.addExact(audibleCompletedMs,(long)elapsed);
-            long sequence=pump.offerCompletedAdvance(token,audibleCompletedMs,samples);
+            long sequence=pump.offerCompletedAdvance(token,audibleCompletedMs,samples,debtMs);
             if(samples!=null&&samples.length>0)measure(pump,sequence,samples,start);
             else if(samples==null)unobserved();
         } catch(RuntimeException|LinkageError unavailable){resetProducer();unobserved();pump.invalidate();enabled(handle,false);}

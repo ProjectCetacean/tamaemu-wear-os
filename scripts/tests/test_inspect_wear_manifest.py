@@ -143,13 +143,13 @@ class ManifestContract(unittest.TestCase):
 
     def test_audioqa_dex_contract_complete_only_for_regular_qa(self):
         import io, zipfile
-        for suffixes in [[], ['Provider'], ['Receiver'], ['Driver'], ['TrackProbe'], ['Provider','Receiver','Driver'], ['Provider','Receiver','Driver','TrackProbe']]:
+        for suffixes in [[], ['Provider'], ['Receiver'], ['Driver'], ['TrackProbe'], ['Provider','Receiver','Driver'], ['Provider','Receiver','Driver','TrackProbe'], ['Provider','Receiver','Driver','TrackProbe','PassiveScalars']]:
             data=io.BytesIO()
             with zipfile.ZipFile(data,'w') as z:
                 z.writestr('classes2.dex', b''.join(('Lio/github/projectcetacean/tamaemu/AudioQaInput'+s+';').encode() for s in suffixes))
             data.seek(0)
             with zipfile.ZipFile(data) as z:
-                if len(suffixes)==4:
+                if len(suffixes)==5:
                     module.validate_audioqa_classes(z,module.QA_PACKAGE,True)
                 else:
                     with self.assertRaisesRegex(AssertionError,'audioqa'):
@@ -160,6 +160,23 @@ class ManifestContract(unittest.TestCase):
                             module.validate_audioqa_classes(z,package,False)
                     else:
                         module.validate_audioqa_classes(z,package,False)
+
+    def test_regular_qa_rejects_missing_passive_scalars_class(self):
+        import io, zipfile
+        # Frozen pre-passive fixture: explicitly omit PassiveScalars, independent
+        # of the inspector's required-class constant.
+        descriptors = b''.join(('Lio/github/projectcetacean/tamaemu/AudioQaInput' + s + ';').encode()
+                               for s in ['Provider', 'Receiver', 'Driver', 'TrackProbe'])
+        self.assertNotIn(b'PassiveScalars', descriptors)
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            archive.writestr('classes.dex', descriptors)
+        data.seek(0)
+        with zipfile.ZipFile(data) as archive:
+            probe = module.validate_manifest(AUDIOQA, module.QA_PACKAGE)
+            self.assertFalse(probe)
+            with self.assertRaisesRegex(AssertionError, 'audioqa'):
+                module.validate_audioqa_classes(archive, module.QA_PACKAGE, True)
 
     def test_probe_requires_plain_application_and_debuggable(self):
         for invalid in [PROBE.replace('android.app.Application', '.TamaemuApplication'),
@@ -296,3 +313,7 @@ class ManifestContract(unittest.TestCase):
         invalid = MANIFEST.split('    E: service (line=9)')[0]
         with self.assertRaises(AssertionError):
             module.validate_manifest(invalid, 'io.github.projectcetacean.tamaemu')
+
+
+if __name__ == '__main__':
+    unittest.main()

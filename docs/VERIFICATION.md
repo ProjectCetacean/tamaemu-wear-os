@@ -2,11 +2,15 @@
 
 The tests use synthetic inputs and do not require proprietary firmware.
 
-Candidate `0.2.0-wear.11` is unreleased. Independent host checks passed for the frozen audio repair; full hosted build, lint, fresh APK inspection and changed-behavior watch acceptance remain pending. Automatic cached-time comparison and Tile-host updates still need physical validation. Rapid-press acoustic lag and continuity remain unresolved.
+Candidate `0.2.0-wear.11` is unreleased. The completed CI and APK evidence below applies only to `9820345`. At this documentation revision, later changes had no completed combined source review, full hosted CI, fresh APK inspection or changed-build watch acceptance. Later changes require their own exact-commit checks. Rapid-press acoustic lag and continuity remain unresolved.
 
-One finite, QA-only generated-silence component test on the watch completed cleanup. It observed restart below the configured threshold and a timing-envelope width above the prior 240-frame (5 ms) assumption, confirming a component dependency mismatch. Guest audio, onset timing, acoustic precision, hidden leading playback heads, drift and behavior across devices remain unverified. The watch's production app remains `0.2.0-wear.10`.
+One finite, QA-only generated-silence component test on the watch completed cleanup. It observed restart below the configured threshold and a timing-envelope width above the prior 240-frame (5 ms) assumption, confirming a component dependency mismatch. That component test did not verify guest audio, onset timing, acoustic precision, hidden leading playback heads, drift or behavior across devices. The watch's production app remains `0.2.0-wear.10`.
 
-The full pull-request [CI run](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39446037368) for [commit `9b8e354`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/9b8e35405188217a2e4d9f7522fa2c4ae56d850f) passed host checks, Android Gradle build/DEX, 311 production and 44 QA tests with zero failures, errors or skips, and Debug/Release lint with 0 errors and 17 warnings. Six APK artifacts were inspected for three-ABI coverage, native flags, JNI, privacy, QA separation, alignment and signatures. Production Debug and regular QA APKs were signed with the existing identity; non-signature entries were verified unchanged. These results apply only to that baseline and do not validate the later audio repair.
+The full pull-request [CI run](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39496730379) for [commit `9820345`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/98203456cb95537e4fc61249ffcd99c3a47a1b1b) passed host checks, Android Gradle build/DEX, and 311 production and 44 QA tests with zero failures, errors or skips. Debug lint reported 0 errors, with 16 production and 17 QA warnings; Release lint passed, but its exact XML warning count was unavailable. Six actual APKs passed three-ABI, native-flag, JNI, privacy, QA-separation, alignment and signature checks. Production Debug and regular QA APKs used the existing signing identity, with all non-signature entries unchanged by signing. These results do not validate later code.
+
+Later host regressions passed for true clock-time advancement, PCM output and pacing, and for retaining independent playback-head references for valid delayed readings. The desktop suite also passed after test-only readiness waits replaced immediate socket-acceptance assumptions. These results do not establish the cause or resolution of the observed watch audio backlog.
+
+Later source adds a QA-only passive scalar capture lasting up to 32 seconds, without care input or generated audio. Counters, latches and the log formatter belong to the QA source set; common code uses a null observer. Manifest and privacy guards passed 44 synthetic tests. This describes a code feature, not an executed watch measurement; exclusion from actual new production APKs still requires inspection of those binaries.
 
 ## Automated checks
 
@@ -73,6 +77,10 @@ Wear 10 at [source commit `1ad4b62`](https://github.com/ProjectCetacean/tamaemu-
 
 This check used the Debug production package. It does not establish migration for every firmware or checkpoint; versions 1 and 2 have synthetic coverage only. Hardware Tile behavior, buttons and speaker latency were outside this check. The [Android CI run for that source](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39001537544) passed 279 Android test cases with no failures, errors or skips.
 
-Rapid-press sound lag and continuity remain unresolved. Acoustic delay, sustained gameplay, battery consumption, long-gap replay, injected save-I/O failure recovery, TalkBack, large fonts and appearance across different watches still need testing.
+QA at `9820345` was installed with verified matching signed APK bytes; the production app stayed on `0.2.0-wear.10`. A scoped care-input check admitted and delivered 16 contacts, with no refusals or cancellations and no contacts left held. It measured delivery and input only, not sound.
+
+Settings showed Care ready and saved UTC with no mismatch or unavailable notice. A cached `MATCH` outcome was inferred from the UI and source; the direct API outcome was not read. This does not establish absolute clock accuracy or a fresh network sync. Cold reopen preserved Normal mode and a valid version-4 checksum, advanced checkpoint generation and left care enabled; the foreground marker was absent after both pauses.
+
+Actual guest-software audio backlog and drops were observed and remain unresolved, blocking a production update. Rapid-press sound lag and continuity remain unresolved. Acoustic delay, sustained gameplay, battery consumption, long-gap replay, injected save-I/O failure recovery, TalkBack, large fonts and appearance across different watches still need testing. Full Tile-host behavior and physical performance are not established by these checks.
 
 Updates need save-continuity and migration checks with the intended app and signer. Keep firmware, saves, keys and raw captures local; see [CONTRIBUTING.md](../CONTRIBUTING.md) for reporting problems.

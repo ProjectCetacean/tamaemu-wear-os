@@ -536,6 +536,7 @@ void periph_write8(Emu *e, uint32_t a, uint8_t v);
 void periph_write32(Emu *e, uint32_t a, uint32_t v);
 uint32_t periph_read32(Emu *e, uint32_t a);
 void periph_tick(Emu *e, uint32_t cycles);
+void periph_tick_at(Emu *e, uint32_t cycles, double hz);
 void periph_buttons(Emu *e, uint8_t mask);  /* update pressed-button mask (bit0-2 = A/B/C) */
 int periph_speed_step(int cur, int dir);  /* game-clock ladder: next stop up (+) or down (-) */
 
