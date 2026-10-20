@@ -210,6 +210,7 @@ public final class AudioBackendTest {
   edges.put("repeatedActualCallerReplayAndOmission",Pipeline::repeated);
   edges.put("actualCallerMissingPcm",Pipeline::missingPcm);
   edges.put("trimsRespectPhysicalPlayback",Pipeline::trimsRespectPhysicalPlayback);
+  edges.put("shortStallsKeepInitialHealthyPhase",Pipeline::shortStallsKeepInitialHealthyPhase);
   edges.put("releaseAfterToneKeepsNextPressCorrelated",AudioBackendTest::releaseAfterToneKeepsNextPressCorrelated);
   edges.put("releaseDuringToneStaysCorrelated",AudioBackendTest::releaseDuringToneStaysCorrelated);
   edges.put("releaseBeforeOnsetStaysUncorrelated",AudioBackendTest::releaseBeforeOnsetStaysUncorrelated);
@@ -361,6 +362,53 @@ public final class AudioBackendTest {
         public void suspend(){throw new AssertionError("unexpected sink suspension");}
         public void resume(){}
         public void stop(){}
+    }
+    /** Small real underruns must not become the healthy reference, even across later stalls. */
+    static void shortStallsKeepInitialHealthyPhase()throws Exception {
+        for(boolean varied:new boolean[]{false,true})for(int head:new int[]{1,96,240}){
+            Rig healthy=new Rig(varied,head,1,false,false,false);healthy.run();
+            for(int duration:new int[]{50,52,54})for(boolean again:new boolean[]{false,true}){
+                Rig r=new Rig(varied,head,1,true,false,false);
+                long quietStartHead=-1,previousTrim=0;
+                for(int at=1;at<=END+700;at++){
+                    r.now=at;r.sink.advance();
+                    boolean blocked=at>=2000&&at<2000+duration
+                            ||again&&at>=3600&&at<3600+duration+4;
+                    boolean due=r.replayTurn>=0?at>=r.replayTurn:at>=r.nextOwner;
+                    if(at<=END&&!blocked&&due)r.owner();
+                    boolean wasRunning=r.sink.running;
+                    r.runTasks();r.retries();
+                    if(!wasRunning&&r.sink.running)quietStartHead=r.sink.consumed;
+                    AudioPump.Summary s=r.pump.latency().summary();
+                    if(s.trimmedFrames>previousTrim){
+                        require(quietStartHead>=0&&r.sink.consumed-quietStartHead>=48000,
+                                "short stall needs one full second actually played quiet");
+                        previousTrim=s.trimmedFrames;
+                    }
+                    if(r.sink.consumed>0&&at<=END-100){
+                        long excess=at*(long)RATE-r.sink.consumed-64L*RATE;
+                        require(s.trimmedFrames<=excess+1,"short stall trim exceeds physical playback loss");
+                    }
+                }
+                String label="varied="+varied+" head="+head+" stall="+duration+" again="+again;
+                AudioPump.Summary s=r.pump.latency().summary();
+                require(r.debt==0&&r.skipped==0,"short stall replays every logical request");
+                require(s.offeredFrames==r.source.emitted&&s.offeredFrames==s.writtenFrames+s.pendingFrames
+                        +s.inflightFrames+s.trimmedFrames+s.droppedFrames+s.expiredFrames+s.flushedFrames,
+                        "short stall literal PCM conservation");
+                require(s.droppedFrames==0&&s.expiredFrames==0&&s.flushedFrames==0&&s.pendingFrames==0,
+                        "short stall permits only explicit quiet trim");
+                require(r.source.expected.size-r.sink.accepted.size==s.trimmedFrames
+                        &&r.sink.accepted.same(r.sink.played),"short stall removed/played accounting");
+                require(Arrays.equals(r.source.expected.notes(),r.sink.played.notes()),"short stall notes and gaps exact");
+                require(r.sink.maxHeld<=2880,"short stall keeps written-ahead ceiling");
+                double delta=r.phase()-healthy.phase();
+                require(delta>=-1.0/RATE&&delta<=head/(double)RATE+1.0/RATE,
+                        "short stall healthy phase "+label+" deltaFrames="+Math.round(delta*RATE));
+                require(r.sink.underruns<=healthy.sink.underruns+(again?2:1),"short stall adds no extra underrun");
+            }
+        }
+        System.out.println("PASS short stalls retain initial healthy phase: 36 cases");
     }
     static void trimsRespectPhysicalPlayback()throws Exception {
         for(String mode:new String[]{"repeat","empty","short"}){

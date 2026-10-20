@@ -62,6 +62,8 @@ final class AudioPump {
     // Executor only: accepted-frame quiet proof and the original trustworthy playback phase.
     private long quietFrom,quietHead=-1,quietAt,quietLow,quietHigh;
     private long phaseAt=-1,phaseOffset,phaseCredit,phaseRetired;
+    // Learn head uncertainty only while this reference has had uninterrupted playback.
+    private boolean phaseFrozen;
     // An exhausted accepted endpoint stays fixed until the refill threshold is crossed.
     // The time immediately before that write bounds the earliest possible playback restart.
     private long refillHead=-1,playbackOffsetLower;
@@ -216,7 +218,7 @@ final class AudioPump {
         // Only writes preceding the previous observation are proven consumed. An underrun
         // may happen between our occupancy read and a write accepting a fresh prefix.
         if(increased){
-            playedFloor=Math.max(playedFloor,underrunObservedWritten);priming=true;
+            playedFloor=Math.max(playedFloor,underrunObservedWritten);priming=true;phaseFrozen=true;
             playbackBound=false;
             // A count observed after accepting a fresh prefix cannot locate the stopped head.
             refillHead=playedFloor==trackWritten?trackWritten:-1;
@@ -283,7 +285,7 @@ final class AudioPump {
         if(known&&trackWritten-reported<playedFloor){occupancy=trackWritten-playedFloor;known=false;}
         else if(platformStarved&&!known)occupancy=Math.min(occupancy,trackWritten-playedFloor);
         boolean starved=trackWritten>0&&occupancy==0&&played>afterWrite;
-        if(known&&starved){refillHead=trackWritten;playbackBound=false;}
+        if(known&&starved){refillHead=trackWritten;playbackBound=false;phaseFrozen=true;}
         if(changed||platformStarved||known&&starved)priming=true;
         int ceiling=Math.min(writable,priming?Math.max(normalQueueFrames,required):normalQueueFrames);
         if(changed||!known&&!boundedUnderrunHead)phaseAt=-1;
@@ -291,7 +293,7 @@ final class AudioPump {
         boolean recover=playedQuiet(at,reported,known&&!priming&&occupancy>0&&!changed&&!platformStarved);
         synchronized(this) {
             long offset=at*FRAMES_PER_MS-(trackWritten-reported);
-            if(known&&!priming&&!changed&&!platformStarved&&phaseAt>=0&&Math.abs(offset-phaseOffset)<=HEAD_BOUND){
+            if(known&&!priming&&!changed&&!platformStarved&&phaseAt>=0&&!phaseFrozen&&Math.abs(offset-phaseOffset)<=HEAD_BOUND){
                 phaseOffset=Math.max(phaseOffset,offset);
                 if(producerSeen&&producerValid)phaseCredit=sourceCredit;
             }
@@ -354,10 +356,11 @@ final class AudioPump {
                         // so its lost playback time remains measurable after quiet refill.
                         long offset=checkAt*FRAMES_PER_MS-(trackWritten-checkQueued);
                         if(phaseAt<0){phaseAt=checkAt;phaseOffset=offset;phaseRetired=retiredFrames;
-                            phaseCredit=sourceCredit;}
+                            phaseCredit=sourceCredit;phaseFrozen=false;}
                         // Learn the conservative healthy head envelope before playback loss.
+                        // An underrun freezes this reference even when its loss fits HEAD_BOUND.
                         // Only matched completed requests may establish source progress.
-                        if(Math.abs(offset-phaseOffset)<=HEAD_BOUND){
+                        if(!phaseFrozen&&Math.abs(offset-phaseOffset)<=HEAD_BOUND){
                             phaseOffset=Math.max(phaseOffset,offset);
                             if(producerSeen&&producerValid)phaseCredit=sourceCredit;
                         }
