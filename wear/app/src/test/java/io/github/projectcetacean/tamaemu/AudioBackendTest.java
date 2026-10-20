@@ -211,6 +211,8 @@ public final class AudioBackendTest {
   edges.put("actualCallerMissingPcm",Pipeline::missingPcm);
   edges.put("trimsRespectPhysicalPlayback",Pipeline::trimsRespectPhysicalPlayback);
   edges.put("shortStallsKeepInitialHealthyPhase",Pipeline::shortStallsKeepInitialHealthyPhase);
+  edges.put("boundaryRefillRestarts",()->Pipeline.restartAndDelayedHead(false));
+  edges.put("delayedHeadRetainsQuietProof",()->Pipeline.restartAndDelayedHead(true));
   edges.put("releaseAfterToneKeepsNextPressCorrelated",AudioBackendTest::releaseAfterToneKeepsNextPressCorrelated);
   edges.put("releaseDuringToneStaysCorrelated",AudioBackendTest::releaseDuringToneStaysCorrelated);
   edges.put("releaseBeforeOnsetStaysUncorrelated",AudioBackendTest::releaseBeforeOnsetStaysUncorrelated);
@@ -277,6 +279,7 @@ public final class AudioBackendTest {
     static final class Rig {
         long now,nextOwner=16,lastAccounted,debt,skipped,replayTurn=-1,lateUntil;
         final int gap,head;final boolean omission,stall,late;boolean repeat;long secondTrim;boolean checkTrueTrim;
+        boolean anyDataRestart,syntheticDelay;int firstRefillMs;
         final ArrayDeque<Runnable> tasks=new ArrayDeque<>();final List<Timer> timers=new ArrayList<>();
         final Source source;final Sink sink;final AudioPump pump;final AudioBackend backend;
         long minResidence=Long.MAX_VALUE,maxResidence,firstTrimAt=-1;int lateUnderruns;
@@ -294,6 +297,7 @@ public final class AudioBackendTest {
         void owner()throws Exception {
             debt+=now-lastAccounted;lastAccounted=now;
             int quantum=(int)Math.min(100,debt);
+            if(stall&&now==2200&&firstRefillMs>0)quantum=Math.min(quantum,firstRefillMs);
             if(omission&&(now==2200||repeat&&now==4200)){skipped+=debt-quantum;debt=quantum;}
             backend.advance(7,quantum,new int[1]);debt-=quantum;
             require(source.guest+skipped+debt==now,"owner no-skip ledger except deliberate omitted requests");
@@ -341,27 +345,77 @@ public final class AudioBackendTest {
     /** Own virtual sink. Head quantization is independent of actual FIFO consumption. */
     static final class Sink implements AudioPump.Output {
         final Rig r;final Samples accepted=new Samples(),played=new Samples();
-        long last,consumed,maxHeld;boolean running;int underruns;double firstTone=Double.NaN;
+        long last,consumed,maxHeld,reportedHead,quietFrom;boolean running,started;int underruns;double firstTone=Double.NaN;
         Sink(Rig r){this.r=r;}
         long held(){return accepted.size-consumed;}
         void advance(){
             long demand=running?(r.now-last)*RATE:0;last=r.now;
             long n=Math.min(demand,held());
             for(int i=0;i<n;i++){short v=accepted.data[(int)consumed++];played.add(v);
-                if(v!=0&&Double.isNaN(firstTone))firstTone=r.now-demand/(double)RATE+i/(double)RATE;}
-            if(demand>n){underruns++;running=false;}
+                if(v!=0){quietFrom=consumed;if(Double.isNaN(firstTone))firstTone=r.now-demand/(double)RATE+i/(double)RATE;}}
+            if(demand>n){underruns++;running=false;quietFrom=consumed;}
         }
         public boolean start(AudioPump.Focus f){last=r.now;return true;}
         public int write(short[] pcm,int offset,int count){advance();int n=(int)Math.min(count,6000-held());
             for(int i=0;i<n;i++)accepted.add(pcm[offset+i]);maxHeld=Math.max(maxHeld,held());
-            if(!running&&held()>=2880){running=true;last=r.now;}return n;}
-        public long queuedFrames(){advance();return accepted.size-(consumed/r.head)*r.head;}
+            int need=started&&r.anyDataRestart?1:2880;
+            if(!running&&held()>=need){running=true;started=true;last=r.now;quietFrom=consumed;}return n;}
+        public long queuedFrames(){advance();
+            // Synthetic reporting delay, independent of physical playback: alternate exact
+            // reads with a 320-frame lag, retaining a monotone head across transitions.
+            long lag=r.syntheticDelay&&running&&r.now%37<18?320:0;
+            reportedHead=Math.max(reportedHead,Math.max(0,(consumed/r.head)*r.head-lag));
+            return accepted.size-reportedHead;}
         public int startThresholdFrames(){return 2880;}
         public int writableFrames(){return 6000;}
         public int underrunCount(){return underruns;}
         public void suspend(){throw new AssertionError("unexpected sink suspension");}
         public void resume(){}
         public void stop(){}
+    }
+    /** Restart may occur on a subthreshold prefix; head reporting may span more than 5 ms.
+     * Both tests use real completed advances and independent physical FIFO assertions. */
+    static void restartAndDelayedHead(boolean delayed)throws Exception {
+        for(boolean varied:new boolean[]{false,true}){
+            Rig healthy=new Rig(varied,1,2,false,false,true);
+            healthy.anyDataRestart=!delayed;healthy.syntheticDelay=delayed;healthy.run();
+            Rig r=new Rig(varied,1,2,true,false,true);
+            r.anyDataRestart=!delayed;r.syntheticDelay=delayed;r.firstRefillMs=5;
+            long previousTrim=0;
+            for(int at=1;at<=END+700;at++){
+                r.now=at;r.sink.advance();
+                boolean blocked=at>=2000&&at<2200||at>=4000&&at<4032;
+                if(at<=END&&!blocked&&(r.replayTurn>=0?at>=r.replayTurn:at>=r.nextOwner))r.owner();
+                r.runTasks();r.retries();AudioPump.Summary s=r.pump.latency().summary();
+                require(s.offeredFrames==s.pendingFrames+s.inflightFrames+s.writtenFrames+s.trimmedFrames
+                        +s.droppedFrames+s.expiredFrames+s.flushedFrames,"restart every-tick conservation");
+                if(s.trimmedFrames>previousTrim){
+                    require(r.sink.consumed-r.sink.quietFrom>=48000,"restart one second physically played quiet");
+                    previousTrim=s.trimmedFrames;
+                }
+                if(r.sink.started&&at<=END-100){
+                    long physicalLoss=at*(long)RATE-r.sink.consumed-64L*RATE;
+                    require(s.trimmedFrames<=physicalLoss+1,"restart physical overtrim <= one frame");
+                }
+                if(at>=4300&&at<=4650){long residence=s.pendingFrames+r.sink.held();
+                    r.minResidence=Math.min(r.minResidence,residence);r.maxResidence=Math.max(r.maxResidence,residence);}
+                if(at==END)r.lateUnderruns=r.sink.underruns;
+            }
+            AudioPump.Summary s=r.pump.latency().summary();
+            require(r.debt==0&&r.skipped==0,"restart retains every logical request");
+            require(s.offeredFrames==r.source.emitted&&s.offeredFrames==r.source.expected.size,"restart literal PCM only");
+            require(s.writtenFrames==r.sink.accepted.size&&r.sink.accepted.same(r.sink.played),"restart complete FIFO drain");
+            require(Arrays.equals(r.source.expected.notes(),r.sink.played.notes()),"restart three notes and unequal gaps exact");
+            require(s.droppedFrames==0&&s.expiredFrames==0&&s.flushedFrames==0&&s.pendingFrames==0&&s.inflightFrames==0,
+                    "restart only counted quiet retirement");
+            require(r.source.expected.size-r.sink.accepted.size==s.trimmedFrames,"restart removed PCM counted once");
+            require(r.sink.maxHeld<=2880&&r.lateUnderruns<=healthy.lateUnderruns+1,"restart ceiling and underrun margin");
+            long tolerance=delayed?321:2;double delta=(r.phase()-healthy.phase())*RATE;
+            require(delta>=-1&&delta<=tolerance,"restart recovery delayed="+delayed+" varied="+varied
+                    +" deltaFrames="+delta+" trimmed="+s.trimmedFrames);
+            require(s.trimmedFrames>0&&r.minResidence>=healthy.minResidence-1
+                    &&r.maxResidence<=healthy.maxResidence+tolerance,"restart recovers residence");
+        }
     }
     /** Small real underruns must not become the healthy reference, even across later stalls. */
     static void shortStallsKeepInitialHealthyPhase()throws Exception {

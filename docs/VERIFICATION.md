@@ -2,7 +2,11 @@
 
 The tests use synthetic inputs and do not require proprietary firmware.
 
-Candidate `0.2.0-wear.11` is unreleased. The full host Java model checks and 152 Python helper tests passed on the combined code candidate. Standalone javac/aapt/Robolectric checks passed all 311 cases across 11 Android test classes, with no failures or ignored cases. These checks do not establish an Android Gradle build, lint, fresh APK inspection or watch acceptance; those remain pending. Automatic cached-time comparison is implemented, but physical API behavior and Tile-host updates remain unverified. Rapid-press sound lag remains unresolved. Earlier migration and CI results below are historical evidence for their named source only.
+Candidate `0.2.0-wear.11` is unreleased. Independent host checks passed for the frozen audio repair; full hosted build, lint, fresh APK inspection and changed-behavior watch acceptance remain pending. Automatic cached-time comparison and Tile-host updates still need physical validation. Rapid-press acoustic lag and continuity remain unresolved.
+
+One finite, QA-only generated-silence component test on the watch completed cleanup. It observed restart below the configured threshold and a timing-envelope width above the prior 240-frame (5 ms) assumption, confirming a component dependency mismatch. Guest audio, onset timing, acoustic precision, hidden leading playback heads, drift and behavior across devices remain unverified. The watch's production app remains `0.2.0-wear.10`.
+
+The full pull-request [CI run](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39446037368) for [commit `9b8e354`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/9b8e35405188217a2e4d9f7522fa2c4ae56d850f) passed host checks, Android Gradle build/DEX, 311 production and 44 QA tests with zero failures, errors or skips, and Debug/Release lint with 0 errors and 17 warnings. Six APK artifacts were inspected for three-ABI coverage, native flags, JNI, privacy, QA separation, alignment and signatures. Production Debug and regular QA APKs were signed with the existing identity; non-signature entries were verified unchanged. These results apply only to that baseline and do not validate the later audio repair.
 
 ## Automated checks
 
