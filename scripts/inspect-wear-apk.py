@@ -88,7 +88,7 @@ def validate_probe_classes(archive, package, probe):
 
 
 AUDIOQA_PREFIX = 'io.github.projectcetacean.tamaemu.AudioQaInput'
-AUDIOQA_SUFFIXES = {'Provider', 'Receiver', 'Driver'}
+AUDIOQA_SUFFIXES = {'Provider', 'Receiver', 'Driver', 'TrackProbe'}
 
 
 def validate_audioqa_manifest(app, package, probe):
@@ -120,7 +120,7 @@ def validate_audioqa_classes(archive, package, audioqa):
     if audioqa:
         assert package == QA_PACKAGE, 'audioqa classes in production package'
         present = {suffix for suffix in AUDIOQA_SUFFIXES if any(prefix + suffix.encode() + b';' in data for data in dex)}
-        assert present == AUDIOQA_SUFFIXES, 'audioqa APK must compile all three input classes'
+        assert present == AUDIOQA_SUFFIXES, 'audioqa APK must compile all four input/probe classes'
     else:
         assert not any(prefix in data for data in dex), 'audioqa classes outside regular QA debug'
 

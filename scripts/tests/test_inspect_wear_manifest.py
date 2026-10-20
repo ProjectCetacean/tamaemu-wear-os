@@ -143,13 +143,13 @@ class ManifestContract(unittest.TestCase):
 
     def test_audioqa_dex_contract_complete_only_for_regular_qa(self):
         import io, zipfile
-        for suffixes in [[], ['Provider'], ['Receiver'], ['Driver'], ['Provider','Receiver','Driver']]:
+        for suffixes in [[], ['Provider'], ['Receiver'], ['Driver'], ['TrackProbe'], ['Provider','Receiver','Driver'], ['Provider','Receiver','Driver','TrackProbe']]:
             data=io.BytesIO()
             with zipfile.ZipFile(data,'w') as z:
                 z.writestr('classes2.dex', b''.join(('Lio/github/projectcetacean/tamaemu/AudioQaInput'+s+';').encode() for s in suffixes))
             data.seek(0)
             with zipfile.ZipFile(data) as z:
-                if len(suffixes)==3:
+                if len(suffixes)==4:
                     module.validate_audioqa_classes(z,module.QA_PACKAGE,True)
                 else:
                     with self.assertRaisesRegex(AssertionError,'audioqa'):

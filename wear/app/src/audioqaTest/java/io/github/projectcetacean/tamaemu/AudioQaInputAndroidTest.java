@@ -72,6 +72,59 @@ public class AudioQaInputAndroidTest {
     void send(String action) throws Exception {receive(app,action,true);}
     void idle(long ms){Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms));}
     @After public void cleanup() throws Exception {if(provider!=null){provider.onActivityPaused(activity);app.unregisterActivityLifecycleCallbacks(provider);} }
+    List<Runnable> probeTasks;
+    AudioQaInputTrackProbe installProbe() throws Exception {
+        Field consumed=AudioQaInputTrackProbe.class.getDeclaredField("consumed");consumed.setAccessible(true);consumed.set(null,false);
+        // The shared contact fixture creates foreground audio when it enters RUNNING.
+        // This probe fixture represents an initial firmware-free setup process instead.
+        set(app,"foregroundAudio",null);
+        probeTasks=new ArrayList<>();
+        AudioQaInputTrackProbeAndroidTest.Time clock=new AudioQaInputTrackProbeAndroidTest.Time();
+        AudioQaInputTrackProbe probe=new AudioQaInputTrackProbe(probeTasks::add,a->new AudioQaInputTrackProbeAndroidTest.Sink(clock),clock);
+        set(field(provider,"driver"),"probe",probe);return probe;
+    }
+    @Test public void trackProbeRejectsCareBusyWrongGatesAndNeverLaunches() throws Exception {
+        AudioQaInputTrackProbe probe=installProbe();
+        send("track-contract");assertTrue("care state refused",probeTasks.isEmpty());
+        send("singles");activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        send("track-contract");assertTrue("busy contacts refused",probeTasks.isEmpty());send("stop");
+        receive(app,"track-contract",false);
+        for(String pkg:new String[]{"io.github.projectcetacean.tamaemu",QA+".extra",QA}){
+            Context wrong=new ContextWrapper(app){@Override public String getPackageName(){return pkg;}@Override public ApplicationInfo getApplicationInfo(){ApplicationInfo i=new ApplicationInfo(super.getApplicationInfo());i.flags=pkg.equals(QA)?0:ApplicationInfo.FLAG_DEBUGGABLE;return i;}};
+            receive(wrong,"track-contract",true);
+        }
+        Intent intent=new Intent("track-contract").setComponent(new ComponentName(QA,AudioQaInputReceiver.class.getName()));
+        intent.putExtra("duration",5000);new AudioQaInputReceiver().onReceive(app,intent);
+        intent.removeExtra("duration");intent.setPackage("wrong");new AudioQaInputReceiver().onReceive(app,intent);
+        intent.setPackage(null).setComponent(new ComponentName(QA,"wrong"));new AudioQaInputReceiver().onReceive(app,intent);
+        assertTrue(probeTasks.isEmpty());assertFalse(probe.busy());
+        assertNull(Shadows.shadowOf(app).getNextStartedActivity());
+    }
+    @Test public void probeOnceAndMutualExclusionSurviveCancelAndOwnerReplacement() throws Exception {
+        AudioQaInputTrackProbe probe=installProbe();activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        send("track-contract");assertEquals(1,probeTasks.size());assertTrue(probe.busy());
+        activity.state(EmulatorSession.State.RUNNING);send("same-c");assertTrue(actions.isEmpty());
+        send("track-contract");send("stop");probeTasks.remove(0).run();idle(1);assertFalse(probe.busy());
+        activity.state(EmulatorSession.State.MISSING_FIRMWARE);send("track-contract");assertTrue(probeTasks.isEmpty());
+        assertFalse("another controller cannot reset process allowance",new AudioQaInputTrackProbe().begin(activity));
+    }
+    @Test public void lifecycleAndWindowFocusCancelBeforeWorkerAllocation() throws Exception {
+        AudioQaInputTrackProbe probe=installProbe();activity.state(EmulatorSession.State.MISSING_FIRMWARE);send("track-contract");
+        provider.onActivityPaused(activity);probeTasks.remove(0).run();idle(1);assertFalse(probe.busy());
+        assertTrue(ShadowLog.getLogsForTag(AudioQaInputTrackProbe.TAG).stream().anyMatch(l->l.msg.contains("reason=cancelled")&&l.msg.contains("released=1")));
+        probe=installProbe();provider.onActivityResumed(activity);send("track-contract");owner.windowFocusChanged(false);
+        probeTasks.remove(0).run();idle(1);assertFalse(probe.busy());
+    }
+    @Test public void previouslyAllocatedPumpEvenIfDisabledRefusesProbe() throws Exception {
+        installProbe();activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        set(app,"foregroundAudio",new ForegroundAudio(app));send("track-contract");assertTrue(probeTasks.isEmpty());
+    }
+    @Test public void unsupportedExtrasCannotStartInput() throws Exception {
+        Intent intent=new Intent("singles").setComponent(new ComponentName(QA,AudioQaInputReceiver.class.getName()));
+        intent.putExtra("repeat",2);
+        new AudioQaInputReceiver().onReceive(app,intent);idle(1000);
+        assertTrue("unsupported extras must fail closed",actions.isEmpty());
+    }
     @Test public void threeDistinctBlocksDeliverExactly16RealContactsAndNeverRepeat() throws Exception {
         send("singles");send("same-c");idle(2000);assertEquals(8,actions.size());
         send("singles");idle(1000);assertEquals("repeat must fail before process cap is reached",8,actions.size());
