@@ -65,6 +65,11 @@ public final class AudioPassiveScalarsTest {
                     ()->new ClockSample(clock[0]+99000,clock[0],4),s->{});
             session.resume(new LifeSessionTest.Listener());worker.through(0);
             check(o.kind(3).isEmpty(),"initial zero rendering is not an offer");
+            // Startup policy v2: warm this backend epoch before the exact-debt witness.
+            backend.advanceWithDebt(1,1,new int[128*128],1);
+            while(!audioTasks.isEmpty())audioTasks.remove().run();
+            backend.advanceWithDebt(1,1,new int[128*128],1);
+            guest.progress=0;o.events.clear();
             clock[0]+=137;worker.through(16);
             List<long[]> offers=o.kind(3);
             check(offers.size()==2&&offers.get(0)[2]==137&&offers.get(1)[2]==37,"LifeOwner exact pre-consume debt 137 then 37");
@@ -123,10 +128,15 @@ public final class AudioPassiveScalarsTest {
             try {
                 AudioPumpTest.Fixture f=new AudioPumpTest.Fixture();f.pump.configure(true);
                 AudioBackendTest.Guest guest=new AudioBackendTest.Guest();
+                boolean[] rejecting={false};
                 AudioBackend bridge=new AudioBackend(guest,new AudioBackend.NativeAudio(){
                     public void enabled(long h,boolean value){}
-                    public short[] drain(long h,int max){return mode.equals("null")?null:new short[mode.equals("empty")?0:mode.equals("oversized")?9601:48];}
+                    public short[] drain(long h,int max){if(!rejecting[0])return new short[48];return mode.equals("null")?null:new short[mode.equals("empty")?0:mode.equals("oversized")?9601:48];}
                 },()->f.pump,()->f.now);
+                // Startup policy v2: reach the live rejection branches, then reset witness counters.
+                bridge.advanceWithDebt(7,1,new int[1],1);f.run();
+                bridge.advanceWithDebt(7,1,new int[1],1);f.run();
+                guest.rendered=0;observer.events.clear();rejecting[0]=true;
                 if(mode.equals("rollover"))guest.during=()->{f.pump.configure(false);f.pump.configure(true);};
                 bridge.advanceWithDebt(7,16,new int[1],137);
                 check(observer.kind(3).isEmpty(),"rejected backend batch cannot claim first debt: "+mode);

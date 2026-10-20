@@ -106,6 +106,8 @@ final class AudioPump {
     private final ArrayDeque<Batch> pending=new ArrayDeque<>();
     private Runnable cancelRetry;
     private Output output;
+    private boolean prepareRequested;
+    private long readyActivation=-1,readyEpoch=-1;
     // Executor only: the current track epoch, reset whenever its buffer is flushed or replaced.
     private long trackWritten, underrunObservedWritten, playedFloor, afterWrite, lastWriteAt, lastReport;
     // Executor only: accepted-frame quiet proof and the original trustworthy playback phase.
@@ -148,6 +150,16 @@ final class AudioPump {
     }
     synchronized boolean accepting() { return active&&focused&&!failed; }
     synchronized long token() { return epoch; }
+    int normalQueueMs() { return normalQueueFrames/FRAMES_PER_MS; }
+    /** Additive executor work: start output without admitting PCM or reading occupancy. */
+    synchronized void prepare(long token) {
+        if(token!=epoch||!accepting()||ready(token))return;
+        prepareRequested=true;schedule();
+    }
+    /** Publication follows successful start and track initialization, including pending focus work. */
+    synchronized boolean ready(long token) {
+        return token==epoch&&accepting()&&output!=null&&readyActivation==activation&&readyEpoch==epoch&&!stop&&!focusDirty;
+    }
     /** Returns the batch sequence, or -1 when rejected. Overflow drops the oldest pending frames. */
     synchronized long offer(long token, short[] samples) {
         if(!accepting()||token!=epoch)return -1;
@@ -189,6 +201,7 @@ final class AudioPump {
     synchronized void invalidate() { epoch++;passiveEpoch(PassiveObserver.INVALIDATE);activation++;discard();stop=true;if(output!=null||queued)schedule(); }
     /** Explicit flushes are counted; a scheduled retry cannot outlive them. */
     private void discard() {
+        prepareRequested=false;
         sourceFrames=0;completedMs=0;sourceCredit=0;missingPcm=0;producerSeen=false;producerValid=true;
         latency.flushed(pendingFrames);retiredFrames+=pendingFrames;pending.clear();pendingFrames=0;cancelRetry();latency.discard();
     }
@@ -247,15 +260,18 @@ final class AudioPump {
         Output old=null,target;long token,activationToken;boolean focusChange,hasFocus,loss,work;
         synchronized(this) {
             queued=false;cancelRetry();
-            if(stop){old=output;output=null;stop=false;focusDirty=false;lossPending=false;}
+            if(stop){old=output;output=null;readyActivation=-1;stop=false;focusDirty=false;lossPending=false;}
             target=output;token=epoch;activationToken=activation;
-            expire(now.getAsLong());work=accepting()&&!pending.isEmpty();
+            expire(now.getAsLong());work=accepting()&&(!pending.isEmpty()||prepareRequested);prepareRequested=false;
             focusChange=focusDirty;focusDirty=false;hasFocus=focused;loss=lossPending;lossPending=false;
         }
         try {
             if(old!=null){old.stop();passiveTrack(token,PassiveObserver.TRACK_STOP);}
             if(target!=null&&loss){target.suspend();restartTrack(now.getAsLong(),token(),PassiveObserver.TRACK_FLUSH);}
             if(target!=null&&focusChange&&hasFocus)target.resume();
+            if(target!=null&&focusChange)synchronized(this){
+                if(epoch==token&&activation==activationToken&&!stop&&!focusDirty)readyEpoch=token;
+            }
             if(!work)return;
             if(target==null) {
                 target=factory.create();
@@ -269,13 +285,15 @@ final class AudioPump {
                 synchronized(this){
                     // Focus callbacks invalidate PCM, but the successful request must stay alive
                     // to receive a later gain. Only an obsolete lifecycle retires this output.
-                    if(activation==activationToken&&active&&!failed)output=target;
+                    if(activation==activationToken&&active&&!failed){
+                        long at=now.getAsLong();restartTrack(at,epoch,PassiveObserver.TRACK_START);lastReport=at;
+                        output=target;readyActivation=activationToken;readyEpoch=epoch;
+                    }
                     else{old=target;target=null;}
                 }
                 if(target==null){old.stop();passiveTrack(token(),PassiveObserver.TRACK_STOP);return;}
-                long at=now.getAsLong();restartTrack(at,token(),PassiveObserver.TRACK_START);lastReport=at;
             }
-            synchronized(this){if(epoch!=token||!accepting())return;}
+            synchronized(this){if(epoch!=token||!accepting()||pending.isEmpty())return;}
             write(target,token);
         } catch(RuntimeException|LinkageError unavailable) {
             synchronized(this){

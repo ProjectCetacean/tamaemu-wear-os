@@ -57,6 +57,12 @@ final class AudioBackend implements EmulatorSession.Backend {
     public void advanceWithDebt(long handle,int elapsed,int[] pixels,long debtMs)throws Exception {
         AudioPump pump=currentPump();long token=pump==null?0:pump.token();
         boolean audible=elapsed>0&&pump!=null&&pump.accepting();
+        // Known debt gates only the first producer of this PCM epoch. Legacy callers
+        // and already-live producers retain literal admission through later stalls.
+        if(audible&&debtMs>=0&&(producerPump!=pump||producerToken!=token)){
+            pump.prepare(token);
+            audible=pump.ready(token)&&debtMs<=pump.normalQueueMs();
+        }
         if(elapsed>0&&!enabled(handle,audible)){
             if(pump!=null)pump.invalidate();audible=false;
         }

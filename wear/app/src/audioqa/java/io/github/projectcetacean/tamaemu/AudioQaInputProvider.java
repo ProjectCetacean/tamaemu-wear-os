@@ -9,12 +9,13 @@ import android.content.pm.ApplicationInfo;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import java.lang.ref.WeakReference;
 
 /** Registers before Application.onCreate, without modifying the production lifecycle. */
 public final class AudioQaInputProvider extends ContentProvider implements Application.ActivityLifecycleCallbacks {
     static final String QA_PACKAGE = "io.github.projectcetacean.tamaemu.qoltest";
     private static AudioQaInputProvider instance;
-    private Activity passiveOwner;
+    private WeakReference<Activity> passiveOwner;
     final AudioQaInputDriver driver = new AudioQaInputDriver();
 
     static boolean enabled(Context context) {
@@ -33,12 +34,12 @@ public final class AudioQaInputProvider extends ContentProvider implements Appli
     }
     @Override public void onActivityResumed(Activity activity) {
         if (activity.getClass() == MainActivity.class && enabled(activity)) {
-            if(passiveOwner!=null&&passiveOwner!=activity)driver.passive.stop("owner_changed");
-            passiveOwner=activity;driver.resume((MainActivity) activity);
+            if(passiveOwner!=null&&passiveOwner.get()!=activity)driver.passive.stop("owner_changed");
+            passiveOwner=new WeakReference<>(activity);driver.resume((MainActivity) activity);
         }
     }
     private void passiveDeparture(Activity activity,String reason) {
-        if(passiveOwner==activity){driver.passive.stop(reason);passiveOwner=null;}
+        if(passiveOwner!=null&&passiveOwner.get()==activity){driver.passive.stop(reason);passiveOwner=null;}
     }
     @Override public void onActivityPaused(Activity activity) { passiveDeparture(activity,"pause");driver.depart(activity, "pause"); }
     @Override public void onActivityStopped(Activity activity) { passiveDeparture(activity,"stop_lifecycle");driver.depart(activity, "stop_lifecycle"); }
