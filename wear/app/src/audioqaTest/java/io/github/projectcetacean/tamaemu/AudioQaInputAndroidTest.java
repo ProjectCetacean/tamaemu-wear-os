@@ -83,6 +83,61 @@ public class AudioQaInputAndroidTest {
         AudioQaInputTrackProbe probe=new AudioQaInputTrackProbe(probeTasks::add,a->new AudioQaInputTrackProbeAndroidTest.Sink(clock),clock);
         set(field(provider,"driver"),"probe",probe);return probe;
     }
+    static int attachListenerCount(View view) throws Exception {
+        Field listenerInfo=View.class.getDeclaredField("mListenerInfo");listenerInfo.setAccessible(true);
+        Object info=listenerInfo.get(view);
+        if(info==null)return 0;
+        Object listeners=field(info,"mOnAttachStateChangeListeners");
+        return listeners==null?0:((List<?>)listeners).size();
+    }
+    private void startFailureCleansUpAndAdmitsLaterContacts(boolean fatal,boolean beforePort) throws Exception {
+        installProbe(); // reset process allowance and represent the original neutral/no-pump stimulus
+        AudioQaInputTrackProbeAndroidTest.Time clock=new AudioQaInputTrackProbeAndroidTest.Time();
+        int[] closes={0};boolean[] focusReleased={false};
+        Error startError=new OutOfMemoryError("synthetic: native/Java allocation during track creation");
+        RuntimeException control=new IllegalStateException("control");
+        AudioQaInputTrackProbe.Port port=new AudioQaInputTrackProbe.Port(){
+            public boolean start(AudioPump.Focus f){if(fatal)throw startError;throw control;}
+            public long head(){return 0;}public int[] grant(){return new int[10];}public int write(short[] z,int n){return 0;}
+            public void close(){closes[0]++;focusReleased[0]=true;}
+        };
+        AudioQaInputTrackProbe probe=new AudioQaInputTrackProbe(probeTasks::add,a->{if(beforePort)throw startError;return port;},clock);
+        set(field(provider,"driver"),"probe",probe);
+        activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        View decor=activity.getWindow().getDecorView();int baseline=attachListenerCount(decor);
+        send("track-contract");assertEquals(1,probeTasks.size());assertTrue(probe.busy());
+        assertEquals(baseline+1,attachListenerCount(decor));assertNull(field(app,"foregroundAudio"));
+        Throwable escaped=null;try{probeTasks.remove(0).run();}catch(Throwable failure){escaped=failure;}
+        // Same Odo timing: advance beyond budget and let all scheduled main callbacks execute.
+        clock.t+=4000000000L;idle(5000);
+        assertEquals(beforePort?0:1,closes[0]);assertEquals(!beforePort,focusReleased[0]);
+        assertFalse("worker failure must disarm",probe.busy());
+        assertEquals("attach listener removed on UI main",baseline,attachListenerCount(decor));
+        assertNull(field(probe,"observer"));assertNull(field(probe,"decor"));
+        assertNull(((WeakReference<?>)field(probe,"owner")).get());
+        List<ShadowLog.LogItem> logs=ShadowLog.getLogsForTag(AudioQaInputTrackProbe.TAG);
+        assertTrue("incomplete end receipt",logs.stream().anyMatch(l->l.msg.startsWith("phase=end")&&l.msg.contains("incomplete=1")&&!l.msg.contains("reason=complete")));
+        assertTrue("disarm receipt",logs.stream().anyMatch(l->l.msg.startsWith("phase=disarmed")&&l.msg.contains("active=0 listenersRemoved=1")));
+        if(fatal){
+            assertSame("fatal error remains fatal",startError,escaped);
+            assertTrue("no invented release certainty",logs.stream().anyMatch(l->l.msg.startsWith("phase=end")&&l.msg.contains("released=0")&&l.msg.contains("incomplete=1")));
+        }else assertNull(escaped);
+        assertNull("no pump allocated in neutral probe",field(app,"foregroundAudio"));
+        send("track-contract");assertTrue("one-shot remains consumed",probeTasks.isEmpty());
+        assertFalse("fresh controller cannot repeat",new AudioQaInputTrackProbe().begin(activity));
+        activity.state(EmulatorSession.State.RUNNING);send("singles");idle(2000);
+        assertEquals("later contact block admitted",8,actions.size());
+        send("singles");idle(2000);assertEquals("contact once quota retained",8,actions.size());
+    }
+    @Test public void outOfMemoryAtStartDisarmsWithIncompleteReceiptAndLaterContacts() throws Exception {
+        startFailureCleansUpAndAdmitsLaterContacts(true,false);
+    }
+    @Test public void runtimeStartFailureControlDisarmsWithIncompleteReceiptAndLaterContacts() throws Exception {
+        startFailureCleansUpAndAdmitsLaterContacts(false,false);
+    }
+    @Test public void allocationFailureBeforePortAlsoDisarmsWithoutInventingRelease() throws Exception {
+        startFailureCleansUpAndAdmitsLaterContacts(true,true);
+    }
     @Test public void trackProbeRejectsCareBusyWrongGatesAndNeverLaunches() throws Exception {
         AudioQaInputTrackProbe probe=installProbe();
         send("track-contract");assertTrue("care state refused",probeTasks.isEmpty());

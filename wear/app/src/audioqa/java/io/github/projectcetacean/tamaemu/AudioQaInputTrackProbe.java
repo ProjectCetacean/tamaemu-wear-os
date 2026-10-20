@@ -82,9 +82,15 @@ final class AudioQaInputTrackProbe {
         main.post(this::watch);
         try {
             executor.execute(()->{
-                Result result=measure(()->factory.apply(activity),clock,()->!cancelled,admittedAt);
-                try { dump(result,clock); }
-                finally {main.post(this::finish);}
+                // Include Run/Result allocation and measurement in the unconditional UI cleanup scope.
+                try {
+                    Result result=measure(()->factory.apply(activity),clock,()->!cancelled,admittedAt);
+                    dump(result,clock);
+                } catch(RuntimeException|Error failure) {
+                    // The result may not exist. Do not allocate another ring or invent release certainty.
+                    try {Log.i(TAG,"phase=end reason=unexpected_error released=0 releaseKnown=0 incomplete=1");}
+                    finally {throw failure;}
+                } finally {main.post(this::finish);}
             });
         } catch(RuntimeException|Error failure) {
             Log.i(TAG,"phase=end reason=worker_start_failed released=1 incomplete=1");finish();
@@ -216,7 +222,7 @@ final class AudioQaInputTrackProbe {
                 long missing=grant[0]-(r.accepted-h);if(missing>0)write((int)missing);idle();
             }
             if(r.previousA<0)throw new Halt("missing_head_window");
-            r.precision=r.maxUpper-r.minLower<=240000000L?"SAMPLED_BOUND_240":
+            r.precision=r.maxGap<=1000000L&&r.maxUnobservedGap<=1000000L&&r.maxUpper-r.minLower<=240000000L?"SAMPLED_BOUND_240":
                     r.maxLower-r.minUpper>240000000L?"SAMPLED_VIOLATION_240":"INCONCLUSIVE";
             phase=4;r.endpoint=r.accepted;until=time()+250000000;
             while(true){long h=head();if(h==r.endpoint&&grant[6]>steadyUnderruns)break;

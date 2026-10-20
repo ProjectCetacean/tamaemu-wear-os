@@ -80,4 +80,68 @@ public class AudioQaInputTrackProbeAndroidTest {
         setup();s.threshold=2880;s.readDelay=6000000;r=run();assertEquals("complete",r.reason);assertEquals(6000000,r.maxBracket);assertEquals("INCONCLUSIVE",r.precision);
     }
     @Test public void ringOverflowDisarmsAndReleases(){t.step=1000;AudioQaInputTrackProbe.Result r=run();assertEquals("overflow",r.reason);assertTrue(r.count<=4096);assertEquals(1,s.closes);}
+    static AudioQaInputTrackProbe.Result precisionRun(long origin,int threshold,int quantum,long step,long readDelay){
+        Time time=new Time();time.t=origin;time.step=step;
+        Sink sink=new Sink(time);sink.threshold=threshold;sink.headQuantum=quantum;sink.readDelay=readDelay;
+        AudioQaInputTrackProbe.Result r=AudioQaInputTrackProbe.measure(()->sink,time,()->true);
+        assertEquals("complete",r.reason);assertEquals(1,sink.closes);
+        // Recompute actual gaps from recorded phase-3 read brackets, not the requested yield.
+        long previousA=-1,previousB=-1,gap=0,unobserved=0;
+        for(int i=0;i<r.count;i++){
+            int a=i*AudioQaInputTrackProbe.WIDTH;long[] e=r.events;
+            if(e[a+1]!=2||e[a+2]!=3)continue;
+            if(previousA>=0){gap=Math.max(gap,e[a+6]-previousA);unobserved=Math.max(unobserved,e[a+6]-previousB);}
+            previousA=e[a+6];previousB=e[a+7];
+        }
+        assertEquals(gap,r.maxGap);assertEquals(unobserved,r.maxUnobservedGap);
+        System.out.println("precision threshold="+threshold+" quantum="+quantum+" step="+step+" delay="+readDelay
+                +" label="+r.precision+" maxGap="+gap+" maxUnobserved="+unobserved+" spread="+(r.maxUpper-r.minLower));
+        return r;
+    }
+    @Test public void phaseLockedLateCoarseHeadsCannotClaimBound(){
+        AudioQaInputTrackProbe.Result dense=precisionRun(0,2880,960,500000,0);
+        assertEquals("SAMPLED_VIOLATION_240",dense.precision);
+        AudioQaInputTrackProbe.Result late=precisionRun(0,2880,960,20000000,0);
+        assertEquals(20000000,late.maxGap);assertEquals(20000000,late.maxUnobservedGap);
+        assertTrue("aliased intervals alone would pass",late.maxUpper-late.minLower<=240000000L);
+        assertEquals("INCONCLUSIVE",late.precision);
+    }
+    @Test public void tenMillisecondAliasedHeadAlsoCannotClaimBound(){
+        AudioQaInputTrackProbe.Result late=precisionRun(0,1920,480,10000000,0);
+        assertEquals(10000000,late.maxGap);assertTrue(late.maxUpper-late.minLower<=240000000L);
+        assertEquals("INCONCLUSIVE",late.precision);
+    }
+    @Test public void precisionDensityBoundaryUsesActualStartGapInclusiveOfOneMillisecond(){
+        AudioQaInputTrackProbe.Result edge=precisionRun(0,2880,1,1000000,0);
+        assertEquals(1000000,edge.maxGap);assertEquals(1000000,edge.maxUnobservedGap);
+        assertEquals("SAMPLED_BOUND_240",edge.precision);
+        AudioQaInputTrackProbe.Result late=precisionRun(0,2880,1,1000001,0);
+        assertEquals(1000001,late.maxGap);assertTrue(late.maxUpper-late.minLower<=240000000L);
+        assertEquals("INCONCLUSIVE",late.precision);
+        // Unobserved gaps alone are insufficient: a bracket consumes part of each start gap.
+        AudioQaInputTrackProbe.Result bracket=precisionRun(0,2880,1,500000,1000000);
+        assertEquals(1500000,bracket.maxGap);assertEquals(500000,bracket.maxUnobservedGap);
+        assertTrue(bracket.maxUpper-bracket.minLower<=240000000L);
+        assertEquals("INCONCLUSIVE",bracket.precision);
+    }
+    @Test public void observedIntervalViolationSurvivesSparseSampling(){
+        AudioQaInputTrackProbe.Result r=precisionRun(0,2880,960,2000000,0);
+        assertEquals(2000000,r.maxGap);assertTrue(r.maxLower-r.minUpper>240000000L);
+        assertEquals("SAMPLED_VIOLATION_240",r.precision);
+    }
+    @Test public void thirtyDayUptimePreservesOriginalStimuliAndEveryEventCell(){
+        long origin=30L*86400L*1000000000L+123456789L;
+        long[][] configs={{480,1,500000,0},{2880,480,500000,0},{2880,1,500000,6000000},{1920,1,500000,0}};
+        for(long[] c:configs){
+            AudioQaInputTrackProbe.Result zero=precisionRun(0,(int)c[0],(int)c[1],c[2],c[3]);
+            AudioQaInputTrackProbe.Result boot=precisionRun(origin,(int)c[0],(int)c[1],c[2],c[3]);
+            assertEquals(origin,boot.begin);assertEquals(zero.reason,boot.reason);assertEquals(zero.precision,boot.precision);
+            assertEquals(zero.restart,boot.restart);assertEquals(zero.count,boot.count);assertEquals(zero.end,boot.end);
+            assertEquals(zero.maxGap,boot.maxGap);assertEquals(zero.maxUnobservedGap,boot.maxUnobservedGap);
+            assertEquals(zero.minLower,boot.minLower);assertEquals(zero.maxLower,boot.maxLower);
+            assertEquals(zero.minUpper,boot.minUpper);assertEquals(zero.maxUpper,boot.maxUpper);
+            for(int i=0;i<zero.count*AudioQaInputTrackProbe.WIDTH;i++)assertEquals("event cell "+i,zero.events[i],boot.events[i]);
+        }
+    }
+
 }
