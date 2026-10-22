@@ -131,6 +131,7 @@ public final class TamaemuApplication extends Application {
                 public int height(long handle) { return NativeBridge.height(handle); }
                 public void advance(long handle, int elapsed, int[] pixels) throws Exception { NativeBridge.advance(handle, elapsed, pixels); }
                 public void headless(long handle,int elapsed) throws Exception { NativeBridge.advanceHeadless(handle,elapsed); }
+                public int replay(long handle,int requested) throws Exception { return NativeBridge.replayHeadless(handle,requested); }
                 public long[] readLife(long handle) { return NativeBridge.readLife(handle); }
                 public void writeLife(long handle,long[] candidate) { NativeBridge.writeLife(handle,candidate); }
                 public byte[] committedPayloadHash(long handle) { return NativeBridge.committedPayloadHash(handle); }

@@ -1,6 +1,7 @@
 package io.github.projectcetacean.tamaemu;
 
 import android.app.Application;
+import android.content.Context;
 import android.graphics.Rect;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -9,6 +10,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewConfiguration;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityManager;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
 import android.widget.TextView;
 import java.lang.reflect.Field;
@@ -194,6 +198,80 @@ public class ControlLayoutAndroidTest {
         assertTrue(target.performAccessibilityAction(R.id.ui_action_controls,null));assertTrue(visible());
         assertTrue(target.performAccessibilityAction(R.id.ui_action_settings,null));assertTrue((Boolean)get(layout,"settingsOpen"));
         assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,target.getImportantForAccessibility());
+    }
+    @Test public void displayToggleAnnouncesResultAndKeepsNextActionLabels() throws Exception {
+        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_YES,display.getImportantForAccessibility());
+        assertControlFeedback(display);
+    }
+    @Test @Config(qualifiers="w192dp-h185dp-round-xxhdpi")
+    public void shellToggleAnnouncesResultAndKeepsNextActionLabels() throws Exception {
+        apply(overlay().withSize(UiPreferences.Size.SMALL).with("integerPixels","true"));
+        View target=(View)get(layout,"displayTapTarget");
+        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_YES,target.getImportantForAccessibility());
+        assertControlFeedback(target);
+    }
+    private void assertControlFeedback(View target) throws Exception {
+        AccessibilityManager manager=(AccessibilityManager)activity.getSystemService(Context.ACCESSIBILITY_SERVICE);
+        Shadows.shadowOf(manager).setEnabled(true);
+        List<String> announcements=new ArrayList<>();List<View> senders=new ArrayList<>();
+        layout.setAccessibilityDelegate(new View.AccessibilityDelegate(){
+            @Override public boolean onRequestSendAccessibilityEvent(ViewGroup host,View child,AccessibilityEvent event){
+                if(event.getEventType()==AccessibilityEvent.TYPE_ANNOUNCEMENT){
+                    senders.add(child);for(CharSequence value:event.getText())announcements.add(value.toString());
+                }
+                return super.onRequestSendAccessibilityEvent(host,child,event);
+            }
+        });
+        assertControlActionLabel(target,"Hide controls");hold(1);int inputWork=ownerTasks;
+        assertTrue(target.performAccessibilityAction(R.id.ui_action_controls,null));
+        assertFalse(visible());releasedOnce(1);lift(1);releasedOnce(1);
+        assertEquals(Arrays.asList("Controls hidden"),announcements);
+        assertControlActionLabel(target,"Show controls");
+        assertTrue(target.performAccessibilityAction(R.id.ui_action_controls,null));
+        assertTrue(visible());assertControlActionLabel(target,"Hide controls");
+        assertEquals(Arrays.asList("Controls hidden","Controls shown"),announcements);
+        assertEquals(Arrays.asList(target,target),senders);
+        assertEquals("Only the required input release may dispatch owner work",inputWork+1,ownerTasks);
+        LifeUiModel model=(LifeUiModel)get(activity,"lifeUi");assertSame(playing,model.status());
+    }
+    private void assertControlActionLabel(View target,String expected){
+        for(AccessibilityNodeInfo.AccessibilityAction action:target.createAccessibilityNodeInfo().getActionList()){
+            if(action.getId()==R.id.ui_action_controls){assertEquals(expected,action.getLabel().toString());return;}
+        }
+        fail("Missing control accessibility action");
+    }
+    @Test public void settingsHintMatchesConstructionAndBothModeTransitions() throws Exception {
+        for(UiPreferences.Controls initial:UiPreferences.Controls.values()){
+            UiPreferences requested=overlay().withControls(initial).with("haptics","true").with("sound","false")
+                    .with("shell","SAGE").with("placement","RIGHT");
+            apply(requested);open();View panel=(View)get(layout,"settings");
+            String[] hints=initial==UiPreferences.Controls.RETRACTABLE
+                    ?new String[]{"Tap display for controls. Hold for settings.","Hold for settings.","Tap display for controls. Hold for settings."}
+                    :new String[]{"Hold for settings.","Tap display for controls. Hold for settings.","Hold for settings."};
+            UiPreferences.Controls[] modes=initial==UiPreferences.Controls.RETRACTABLE
+                    ?new UiPreferences.Controls[]{UiPreferences.Controls.RETRACTABLE,UiPreferences.Controls.VISIBLE,UiPreferences.Controls.RETRACTABLE}
+                    :new UiPreferences.Controls[]{UiPreferences.Controls.VISIBLE,UiPreferences.Controls.RETRACTABLE,UiPreferences.Controls.VISIBLE};
+            TextView hint=text(panel,hints[0]);assertNotNull("Construction hint for "+initial,hint);
+            Button mode=findPrefix("Controls:");assertNotNull(mode);
+            for(int i=0;i<3;i++){
+                if(i>0)mode.performClick();
+                assertEquals("Hint refreshes synchronously",hints[i],hint.getText().toString());
+                assertSame("Keep the existing panel",panel,get(layout,"settings"));
+                java.util.Map<String,String> expected=new java.util.LinkedHashMap<>(requested.encode());
+                expected.put("controls",modes[i].name());assertEquals(expected,prefs().encode());
+                assertEquals("Selected settings persist",expected,new UiPreferencesStore(activity).load().encode());
+            }
+            activity.onBackPressed();measure();
+        }
+        assertEquals("Mode guidance must not dispatch owner work",0,ownerTasks);assertTrue(edges.isEmpty());
+        LifeUiModel model=(LifeUiModel)get(activity,"lifeUi");assertSame(playing,model.status());
+    }
+    @Test public void alwaysVisibleDisplayTapKeepsControlsAndHoldOpensSettings() throws Exception {
+        apply(overlay().withControls(UiPreferences.Controls.VISIBLE));
+        tapTarget();assertTrue(visible());assertFalse((Boolean)get(layout,"settingsOpen"));
+        longTarget();assertTrue((Boolean)get(layout,"settingsOpen"));
+        assertNotNull(text(layout,"Hold for settings."));
+        assertEquals(0,ownerTasks);assertTrue(edges.isEmpty());
     }
     @Test public void hiddenControlsNotFocusable() throws Exception {
         tapTarget();

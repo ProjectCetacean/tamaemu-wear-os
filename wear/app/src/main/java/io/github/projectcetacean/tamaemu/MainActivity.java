@@ -338,7 +338,8 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         private void toggleControls(boolean forced) {
             if (!running || settingsOpen || preferences.controls != UiPreferences.Controls.RETRACTABLE || (!forced && input.hasActiveInput())) return;
             releaseControls(); controlsVisible = !controlsVisible; updateTargets();
-            display.announceForAccessibility(getString(controlsVisible ? R.string.ui_hide_controls : R.string.ui_show_controls));
+            (shellTapTarget() ? displayTapTarget : display).announceForAccessibility(
+                    getString(controlsVisible ? R.string.ui_controls_shown : R.string.ui_controls_hidden));
         }
         private void openSettings() {
             if (settingsOpen) return;

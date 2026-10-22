@@ -307,17 +307,24 @@ final class LifeOwner {
             // oldest captured input boundary until its preceding debt is consumed.
             ButtonBoundary input=nextMode==null?accountPumpBoundary():null;
             if(ledger.debtMs>0) {
-                int quantum=(int)Math.min(100,ledger.debtMs);
+                boolean replay=catching||!foreground;
+                // Snapshot owed work before the call. Never cross a deferred input release.
+                int quantum=(int)Math.min(replay?EmulatorSession.MAX_REPLAY_MILLIS:100,ledger.debtMs);
                 for(long release:releaseAtProgress)if(release>progressed)quantum=(int)Math.min(quantum,release-progressed);
-                long afterProgress=Math.addExact(progressed,quantum);
-                if(catching||!foreground)backend.headless(handle,quantum);
-                else backend.advanceWithDebt(handle,quantum,pixels,ledger.debtMs);
-                ledger=LifeLedger.consume(ledger,quantum);progressed=afterProgress;
+                long afterProgress=Math.addExact(progressed,quantum); // Check before any guest mutation.
+                if(replay) {
+                    int completed=EmulatorSession.checkedReplayCompletion(quantum,backend.replay(handle,quantum));
+                    ledger=LifeLedger.consumeReplay(ledger,completed,quantum);
+                    progressed=Math.addExact(progressed,completed);
+                } else {
+                    backend.advanceWithDebt(handle,quantum,pixels,ledger.debtMs);
+                    ledger=LifeLedger.consume(ledger,quantum);progressed=afterProgress;
+                }
                 releaseDueButtons();
                 if(catching)publishReplayProgress();else publishStatus();
                 if(!catching&&foreground&&foregroundWanted)publishFrame();
                 if(worker.nowMillis()-lastCheckpoint>=EmulatorSession.CHECKPOINT_MILLIS&&!persist()) { rejectMode();finishJob();return; }
-                // One native call per queued turn: lifecycle/cancel/input always gets a boundary.
+                // One bounded replay call per turn: queued lifecycle/cancel/input retains a boundary.
                 if(ledger.debtMs>0){ensurePump(0);return;}
             }
             if(!catching&&worker.nowMillis()-lastCheckpoint>=EmulatorSession.CHECKPOINT_MILLIS&&!persist())return;

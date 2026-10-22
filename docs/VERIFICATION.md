@@ -1,8 +1,20 @@
 # Verification
 
-The tests use synthetic inputs and do not require proprietary firmware.
+Candidate `0.2.0-wear.12` (version code 12) is unreleased. Combined source review, final replay-batch review, full hosted Android/CI, inspected APKs and watch acceptance remain pending. Host results do not establish care-ready reopen time, speaker latency or app completion.
 
-Candidate `0.2.0-wear.11` is unreleased; production remains held at `0.2.0-wear.10`. The historical CI and APK results below cover `9e3b8a4`, before the startup changes. Release requires combined source review, full hosted CI, APK inspection and watch acceptance tied to the intended changed artifact. See the [current pull-request checks](https://github.com/ProjectCetacean/tamaemu-wear-os/pull/3/checks) for commit-specific automated evidence. Rapid-press acoustic lag and continuity remain unresolved.
+## Current host evidence
+
+The permanent native regression passed 2,031 checks against a frozen literal reference, covering raw state, save/reopen, continuation and guarded hard-HALT eligibility and event boundaries. It uses synthetic inputs without proprietary firmware. Exact batching is restricted to eligible unchanged ticks; the original execution path handles boundaries and unsupported states.
+
+A separate host comparison using local inputs matched original and candidate guest-state digests over two guest minutes. Candidate headless/rendered and save/reopen comparisons passed at eight hours, one day and three days. The eight-hour headless replay took about 0.246 seconds; the whole paired host check took about 2.567 seconds. Long-interval comparisons here were within the candidate, not against the original: the original long comparison timed out. These are scoped native host measurements, excluding Android owner and watch care-ready acceptance.
+
+The integrated 19 Java model mains and actual JNI checks passed, including 151 new JNI checks. Replay grouping uses existing steps of at most 100 ms with a nominal 2 ms budget sampled between operations. The fallback completes one existing step; only exact reported completion consumes debt. Unknown failures require recovery from a durable checkpoint. Scheduling and an already-started operation can delay return, so the budget is no strict physical latency guarantee. Normal away aging, owed time, save/retry, clock, input and live-audio contracts remain unchanged.
+
+Control feedback and mode-aware guidance have source and host coverage. Android execution, actual TalkBack events, visible watch guidance and retained settings still need checking. No new assets were needed.
+
+## Historical wear.11 host and CI evidence
+
+The following results predate the wear.12 replay and control changes. The historical CI and APK results cover `9e3b8a4`, before the startup changes. See the [pull-request checks](https://github.com/ProjectCetacean/tamaemu-wear-os/pull/3/checks) for commit-specific automated evidence. Rapid-press acoustic lag and continuity remain unresolved.
 
 The candidate prepares audio output before admitting initial live samples. While output is preparing or current emulation debt exceeds the selected normal target (30, 40 or 60 ms), guest time advances without producing audio. Once output is ready and debt is at or below that target, live audio begins from current guest state. Guest chronology, owed time, input and save accounting are preserved; startup elapsed time does not become queued historical audio. After live audio starts, the existing literal sample stream, FIFO order, notes, gaps, admission and recovery rules continue unchanged, including during stalls. Transient debt does not gate an existing live stream again. Legacy callers with unknown debt retain their existing behavior and lazy output configuration.
 
@@ -18,7 +30,7 @@ One finite, QA-only generated-silence component test on the watch completed clea
 
 The [Wear workflow](../.github/workflows/wear.yml) runs:
 
-- Python helper tests, the upstream desktop suite, native CTest, host JNI, native-save-to-Tile-reader tests and Java model tests.
+- Python helper tests, the upstream desktop suite, native CTest, the permanent exact hard-HALT replay regression, host JNI, native-save-to-Tile-reader tests and Java model tests.
 - Debug and Release builds, separate audio QA builds and a Tile transport test build.
 - Native compiler-flag checks across three ABIs, APK privacy, signature and alignment checks, and checks that test code stays out of production builds.
 - Android unit tests, QA-input tests and Debug/Release lint.
@@ -75,11 +87,11 @@ Review the exact source commit, its outgoing history and each artifact intended 
 
 ## Watch testing
 
-Wear 10 at [source commit `1ad4b62`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/1ad4b62c7579d1fdd6b89c5131ac0900e46b8f2a) was installed with the existing signer, with installed bytes matching the signed artifact. One existing iD L clock-setting checkpoint migrated from version 3 to version 4 with a valid payload checksum. Normal mode was preserved, checkpoint generations advanced, and cold process reopen and resaving succeeded. The foreground marker was absent after the lifecycle save completed.
+Historical Wear 10 at [source commit `1ad4b62`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/1ad4b62c7579d1fdd6b89c5131ac0900e46b8f2a) was installed with the existing signer, with installed bytes matching the signed artifact. One existing iD L clock-setting checkpoint migrated from version 3 to version 4 with a valid payload checksum. Normal mode was preserved, checkpoint generations advanced, and cold process reopen and resaving succeeded. The foreground marker was absent after the lifecycle save completed.
 
 This check used the Debug production package. It does not establish migration for every firmware or checkpoint; versions 1 and 2 have synthetic coverage only. Hardware Tile behavior, buttons and speaker latency were outside this check. The [Android CI run for that source](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39001537544) passed 279 Android test cases with no failures, errors or skips.
 
-QA at `9820345` was installed with verified matching signed APK bytes; the production app stayed on `0.2.0-wear.10`. A scoped care-input check admitted and delivered 16 contacts, with no refusals or cancellations and no contacts left held. It measured delivery and input only, not sound.
+Historical QA at `9820345` was installed with verified matching signed APK bytes; the production app stayed on `0.2.0-wear.10`. A scoped care-input check admitted and delivered 16 contacts, with no refusals or cancellations and no contacts left held. It measured delivery and input only, not sound.
 
 Settings showed Care ready and saved UTC with no mismatch or unavailable notice. A cached `MATCH` outcome was inferred from the UI and source; the direct API outcome was not read. This does not establish absolute clock accuracy or a fresh network sync. Cold reopen preserved Normal mode and a valid version-4 checksum, advanced checkpoint generation and left care enabled; the foreground marker was absent after both pauses.
 

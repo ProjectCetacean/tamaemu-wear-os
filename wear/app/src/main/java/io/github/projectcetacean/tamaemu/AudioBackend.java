@@ -98,6 +98,11 @@ final class AudioBackend implements EmulatorSession.Backend {
         resetProducer();unobserved();enabled(handle,false);AudioPump pump=output.get();if(pump!=null)pump.invalidate();
         guest.headless(handle,elapsed);progress+=elapsed;
     }
+    public int replay(long handle,int requested)throws Exception {
+        resetProducer();unobserved();enabled(handle,false);AudioPump pump=output.get();if(pump!=null)pump.invalidate();
+        int completed=EmulatorSession.checkedReplayCompletion(requested,guest.replay(handle,requested));
+        progress+=completed;return completed;
+    }
     public long[] readLife(long handle){return guest.readLife(handle);}
     public void writeLife(long handle,long[] values){guest.writeLife(handle,values);}
     public byte[] committedPayloadHash(long handle){return guest.committedPayloadHash(handle);}

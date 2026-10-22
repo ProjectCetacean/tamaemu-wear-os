@@ -62,6 +62,12 @@ final class LifeLedger {
         if (ms < 0 || ms > 100 || ms > r.debtMs) throw new IllegalArgumentException("Invalid life quantum");
         long[] a=r.toArray(); a[4]-=ms; return LifeRecord.from(a);
     }
+    /** Separate checked replay accounting leaves literal consume(0..100) unchanged. */
+    static LifeRecord consumeReplay(LifeRecord r,int completed,int requested) {
+        if(requested<=0||requested>EmulatorSession.MAX_REPLAY_MILLIS||requested>r.debtMs
+                ||completed<=0||completed>requested)throw new IllegalArgumentException("Invalid replay consumption");
+        long[] a=r.toArray();a[4]=Math.subtractExact(r.debtMs,completed);return LifeRecord.from(a);
+    }
     static LifeRecord nextGeneration(LifeRecord r) {
         long[] a=r.toArray(); a[6]=Math.addExact(r.generation,1); return LifeRecord.from(a);
     }

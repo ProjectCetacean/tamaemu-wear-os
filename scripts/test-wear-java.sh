@@ -14,7 +14,7 @@ wear_src=wear/app/src/main/java/io/github/projectcetacean/tamaemu
 wear_tests=wear/app/src/test/java/io/github/projectcetacean/tamaemu
 mkdir -p "$wear_out"
 wear_models=(TimeVerifier AudioPump AudioBackend EmulatorSession LifeLedger LifeOwner LifeScheduler LifeUiModel CommittedPreviewPublisher WatchGeometry UiPreferences ButtonState PetPreviewSnapshot PetPreviewStore TileCallbackQueue)
-wear_mains=(AudioPassiveScalarsTest TimeVerifierTest AudioPumpTest AudioBackendTest EmulatorSessionTest LifeLedgerTest LifeSessionTest LifeSchedulerTest LifeUiModelTest CommittedPreviewPublisherTest WatchGeometryTest RecoveryLifecycleTest UiPreferencesTest ButtonStateTest PetPreviewStoreTest TileCallbackQueueTest AudioStartupTest)
+wear_mains=(ReplayBatchTest AudioReplayBatchTest AudioPassiveScalarsTest TimeVerifierTest AudioPumpTest AudioBackendTest EmulatorSessionTest LifeLedgerTest LifeSessionTest LifeSchedulerTest LifeUiModelTest CommittedPreviewPublisherTest WatchGeometryTest RecoveryLifecycleTest UiPreferencesTest ButtonStateTest PetPreviewStoreTest TileCallbackQueueTest AudioStartupTest)
 wear_files=()
 for model in "${wear_models[@]}"; do wear_files+=("$wear_src/$model.java"); done
 for main in "${wear_mains[@]}"; do wear_files+=("$wear_tests/$main.java"); done

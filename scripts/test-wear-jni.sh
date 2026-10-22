@@ -18,3 +18,11 @@ if (( $# == 1 )); then
         -cp "$root/build/wear-jni-host/jni-test-classes" \
         io.github.projectcetacean.tamaemu.LifeJniProbe "$1"
 fi
+
+# Additional firmware-free batch regression; retain the existing JNI checks above.
+"$JAVA_HOME/bin/javac" --release 8 -cp "$root/build/wear-jni-host/jni-test-classes" \
+    -d "$root/build/wear-jni-host/jni-test-classes" \
+    "$root/wear/app/src/test/java/io/github/projectcetacean/tamaemu/NativeReplayBatchTest.java"
+"$JAVA_HOME/bin/java" -Djava.library.path="$root/build/wear-jni-host" \
+    -cp "$root/build/wear-jni-host/jni-test-classes" \
+    io.github.projectcetacean.tamaemu.NativeReplayBatchTest

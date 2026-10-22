@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 #include "backend.h"
 /* The Java contract serializes every call on one worker. Opaque monotonically
  * assigned tokens ensure a stale Java handle never dereferences freed memory. */
@@ -69,6 +70,32 @@ JNIEXPORT void JNICALL JNI_NAME(advanceHeadless)(JNIEnv *env,jclass cls,jlong to
     (void)cls;WearBackend *b=lookup(env,token);if(!b) return;
     if(ms<0 || ms>100) {raise(env,"java/lang/IllegalArgumentException","Headless elapsed time must be within 0..100ms");return;}
     char error[160];if(!wear_advance_headless(b,ms,error)) raise(env,"java/io/IOException",error);
+}
+/* This API groups existing literal operations; it never widens the backend quantum.
+ * At least one operation completes on success. A failure, including a failed clock,
+ * throws without acknowledging a prefix: the owner must not save unknown guest state.
+ * The nominal wall window excludes scheduling/preemption and one in-flight operation.
+ */
+JNIEXPORT jint JNICALL JNI_NAME(advanceHeadlessBatch)(JNIEnv *env,jclass cls,jlong token,jint requested) {
+    (void)cls;WearBackend *b=lookup(env,token);if(!b) return 0;
+    if(requested<=0 || requested>60000) {
+        raise(env,"java/lang/IllegalArgumentException","Replay request must be within 1..60000ms");return 0;
+    }
+    struct timespec start,now;
+    if(clock_gettime(CLOCK_MONOTONIC,&start)!=0) {
+        raise(env,"java/io/IOException","Replay monotonic clock unavailable");return 0;
+    }
+    jint completed=0;char error[160];
+    do {
+        jint step=requested-completed;if(step>100)step=100;
+        if(!wear_advance_headless(b,step,error)) {raise(env,"java/io/IOException",error);return 0;}
+        completed+=step;
+        if(completed==requested)return completed;
+        if(clock_gettime(CLOCK_MONOTONIC,&now)!=0) {
+            raise(env,"java/io/IOException","Replay monotonic clock unavailable");return 0;
+        }
+    } while((int64_t)(now.tv_sec-start.tv_sec)*INT64_C(1000000000)+now.tv_nsec-start.tv_nsec<INT64_C(2000000));
+    return completed;
 }
 JNIEXPORT jlongArray JNICALL JNI_NAME(readLife)(JNIEnv *env,jclass cls,jlong token) {
     (void)cls;WearBackend *b=lookup(env,token);if(!b) return NULL;

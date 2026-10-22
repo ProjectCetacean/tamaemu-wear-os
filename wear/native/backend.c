@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
+#include <fenv.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -256,6 +257,84 @@ static void audio_observe(WearBackend *b) {
         a->hz=audio_hz(e);a->freq=audio_pitch(e,a->hz);
     }
 }
+/* Exact repeated binary64 addition, without multiplying the increment.
+ * Within a positive binade every value lies on the same ULP lattice. Rounding
+ * x+d then advances by a constant integer number of ULPs. For a halfway d,
+ * the first ordinary addition makes the result even; every following rounded
+ * increment is even, so the stride stays constant. A binade crossing is always
+ * performed by an ordinary addition. The integer jump stays strictly inside
+ * the binade, including the subnormal lattice. Caller requires round-to-nearest,
+ * binary64 evaluation, finite nonnegative x/d, and finite endpoints. */
+static double idle_add_repeated(double x,double d,unsigned n) {
+    while(n) {
+        uint64_t before,bits,next;memcpy(&before,&x,8);
+        x+=d;n--;memcpy(&bits,&x,8);
+        if(!n || (before>>52)!=(bits>>52)) continue;
+        double y=x+d;memcpy(&next,&y,8);
+        if((bits>>52)!=(next>>52)) continue;
+        uint64_t stride=next-bits;
+        if(!stride) return x;
+        uint64_t edge=((bits>>52)+1)<<52;
+        uint64_t count=(edge-1-bits)/stride;
+        if(count>n) count=n;
+        bits+=count*stride;memcpy(&x,&bits,8);n-=(unsigned)count;
+    }
+    return x;
+}
+/* Combine only whole, unchanged 256-cycle hard-HALT ticks. Every true event
+ * (including masked RTC status) and every integer-second stderr flush remains
+ * on the original path. No cached guest state survives a call or a guest write. */
+static unsigned idle_skip_ticks(Emu *e,double until,unsigned allowance) {
+#if FLT_EVAL_METHOD != 0 || defined(__FAST_MATH__)
+    (void)e;(void)until;(void)allowance;return 0;
+#else
+    if(!e->halted || !e->halt_hard || e->stopped || e->cycles!=e->last_tick ||
+       e->pending_irq || e->pending_level || e->wake_req || e->rtc_mult!=1 ||
+       e->cmu.mclk_hz<1048576 || e->cmu.mclk_hz>200000000 ||
+       !isfinite(e->cmu.mclk_hz) || e->dev.io_base!=PS_IO_BASE ||
+       e->dev.io_size<0x1b28 || e->dev.ir_gpio || e->dev.nfc_pn512 ||
+       e->link || e->auto_link || e->nfc_peer || e->nfc_vpeer || e->auto_touch ||
+       e->ir_tx_ready_at || e->irg_tx_burst || e->irg_rx_have ||
+       e->flash_busy || e->flash_state || e->flash_autoselect ||
+       e->trace || e->io_log || e->ir_log || e->tone_log || e->btn_log ||
+       e->nfc_log || e->nfc_log_rf || e->lcd.log || e->n_pc_hook ||
+       e->post_ir_trace || e->btn_mask>7 || fegetround()!=FE_TONEAREST)
+        return 0;
+    const uint8_t *io=e->ioram;
+    /* Even a stale pending field cannot hide enabled latched causes. Reject
+     * the whole enable/flag byte pairs, a superset of itc_scan's live bits. */
+    for(unsigned i=0;i<8;i++) if(io[0x270+i]&io[0x280+i]) return 0;
+    if((io[0x2a6]&io[0x2a9]) || io[e->dev.ir_base+5-e->dev.io_base]) return 0;
+    for(unsigned i=0;i<6;i++) if(io[0x786+i*8]&1) return 0;
+    double time=e->emu_secs,sec=e->rtc_sec_frac,irq=e->rtc_irq_frac;
+    static const double periods[]={1.0/64,1,60,3600};
+    double period=periods[(io[0x1904]>>2)&3];
+    int running=!(io[0x1908]&2) && !(io[0x190c]&1);
+    if(!isfinite(time) || time<0 || time>=0x1p52 ||
+       !isfinite(sec) || sec<0 || sec>=1 ||
+       !isfinite(irq) || irq<0 || irq>=period) return 0;
+    double next_second=floor(time)+1,limit=fmin(until,next_second);
+    double d=256/e->cmu.mclk_hz,room=fmin(limit-time,period-irq);
+    if(running) room=fmin(room,1-sec);
+    unsigned n=allowance/16;
+    uint64_t safe=(UINT64_MAX-e->cycles)/256;
+    if(safe<n) n=(unsigned)safe;
+    /* Leave a tick at each estimated boundary, then validate exact endpoints.
+     * An inaccurate estimate can only forgo a batch, never cross an event. */
+    double estimate=room/d;
+    if(!(estimate>2) || !n) return 0;
+    if(estimate<n) n=(unsigned)estimate;
+    if(n<2) return 0;
+    n--;
+    double end_time=idle_add_repeated(time,d,n);
+    double end_sec=running?idle_add_repeated(sec,d,n):sec;
+    double end_irq=idle_add_repeated(irq,d,n);
+    if(!(end_time<limit) || !(end_irq<period) || !(end_sec<1)) return 0;
+    e->emu_secs=end_time;e->rtc_sec_frac=end_sec;e->rtc_irq_frac=end_irq;
+    e->cycles+=(uint64_t)n*256;e->last_tick=e->cycles;
+    return n*16;
+#endif
+}
 static int advance_execution(WearBackend *b,int ms,int audible,char error[160]) {
     if(ms>100) ms=100;
     Emu *e=b->e;double until=b->deadline+(double)ms/1000;
@@ -263,6 +342,10 @@ static int advance_execution(WearBackend *b,int ms,int audible,char error[160]) 
     unsigned steps=0;
     if(audible) audio_observe(b);
     while(e->emu_secs<until && !e->stopped && steps++<10000000) {
+        if(e->halted && !audible) {
+            unsigned skipped=idle_skip_ticks(e,until,10000001-steps);
+            if(skipped) {steps+=skipped-1;continue;}
+        }
         double clock=e->cmu.mclk_hz;
         unsigned idle=e->halted?cpu_skip_idle(e,10000001-steps):0;
         if(idle) steps+=idle-1;else cpu_step(e);

@@ -50,6 +50,9 @@ jobs:
       - name: Native tests (no firmware)
         if: github.event_name != 'workflow_dispatch'
         run: scripts/test-wear-native.sh 2>&1 | tee native-test.log
+      - name: Exact hard-HALT replay regression (no firmware)
+        if: github.event_name != 'workflow_dispatch'
+        run: bash scripts/check-wear-fast-replay.sh "$RUNNER_TEMP/wear-fast-replay" 2>&1 | tee fast-replay-test.log
       - name: Verify preinstalled Android tools
         shell: bash
         run: |
