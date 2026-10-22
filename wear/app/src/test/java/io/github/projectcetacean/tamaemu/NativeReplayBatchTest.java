@@ -5,6 +5,12 @@ import java.util.*;
 
 /** Public synthetic instruction fixtures only; compare complete durable payloads at common boundaries. */
 public final class NativeReplayBatchTest {
+  private static int emit(byte[] image,int offset,int... words) {
+    for(int word:words){image[offset++]=(byte)word;image[offset++]=(byte)(word>>8);}return offset;
+  }
+  private static int storeTone(byte[] image,int offset,int address,int value) {
+    return emit(image,offset,0xc000|(address>>>19),0xc000|((address>>>6)&8191),0x6c00|((address&63)<<4),0xc000|(value>>>6),0x6c01|((value&63)<<4),0x3401);
+  }
     static int checks;
     static void check(boolean ok,String why){checks++;if(!ok)throw new AssertionError(why);}
     interface Op{void run()throws Exception;}
@@ -23,12 +29,12 @@ public final class NativeReplayBatchTest {
         byte[] image=new byte[8388608];Arrays.fill(image,(byte)255);
         image[0x400000]=0;image[0x400001]=1;image[0x400002]=0x40;image[0x400003]=2;
         int cursor=0x400100;
-        cursor=LifeJniProbe.storeTone(image,cursor,0x300780,24);
-        cursor=LifeJniProbe.storeTone(image,cursor,0x300782,255);
-        cursor=LifeJniProbe.storeTone(image,cursor,0x300783,71);
-        cursor=LifeJniProbe.storeTone(image,cursor,0x3007e0,8);
-        cursor=LifeJniProbe.storeTone(image,cursor,0x300786,5);
-        LifeJniProbe.emit(image,cursor,0x0080);Files.write(rom,image);
+        cursor=storeTone(image,cursor,0x300780,24);
+        cursor=storeTone(image,cursor,0x300782,255);
+        cursor=storeTone(image,cursor,0x300783,71);
+        cursor=storeTone(image,cursor,0x3007e0,8);
+        cursor=storeTone(image,cursor,0x300786,5);
+        emit(image,cursor,0x0080);Files.write(rom,image);
         Path sa=dir.resolve("literal.state"),sb=dir.resolve("batch.state");
         long a=NativeBridge.open(rom.toString(),sa.toString()),b=NativeBridge.open(rom.toString(),sb.toString());
         if(args.length>0&&args[0].equals("--compat")) {
