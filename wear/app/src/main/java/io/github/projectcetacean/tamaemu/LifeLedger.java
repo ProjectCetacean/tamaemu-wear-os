@@ -35,6 +35,7 @@ final class LifeRecord {
 
 /** Pure checked accounting. Execution budgets never cap this ledger. */
 final class LifeLedger {
+    static final int MAX_REPLAY_MILLIS = 60_000;
     private LifeLedger() {}
     static LifeRecord initialize(ClockSample s) {
         return LifeRecord.from(new long[]{1,s.wallMs,s.elapsedMs,s.bootCount,0,0,1,0});
@@ -64,7 +65,7 @@ final class LifeLedger {
     }
     /** Separate checked replay accounting leaves literal consume(0..100) unchanged. */
     static LifeRecord consumeReplay(LifeRecord r,int completed,int requested) {
-        if(requested<=0||requested>EmulatorSession.MAX_REPLAY_MILLIS||requested>r.debtMs
+        if(requested<=0||requested>MAX_REPLAY_MILLIS||requested>r.debtMs
                 ||completed<=0||completed>requested)throw new IllegalArgumentException("Invalid replay consumption");
         long[] a=r.toArray();a[4]=Math.subtractExact(r.debtMs,completed);return LifeRecord.from(a);
     }

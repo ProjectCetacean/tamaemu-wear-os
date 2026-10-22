@@ -240,9 +240,35 @@ def validate_required_kind(package, probe, required_kind=None):
     assert probe == (required_kind == 'tile-probe'), 'APK is not the required QA artifact kind: ' + required_kind
 
 
-def validate_package_version(badging, package):
-    assert f"package: name='{package}'" in badging, 'APK package differs from requested package'
-    assert "versionCode='11'" in badging and "versionName='0.2.0-wear.11'" in badging, 'APK version must be 11 / 0.2.0-wear.11'
+def source_package_version(build_file=None):
+    """Accept only unique literal declarations; do not evaluate Gradle expressions."""
+    if build_file is None:
+        build_file = Path(__file__).resolve().parents[1] / 'wear/app/build.gradle'
+    try:
+        source = Path(build_file).read_text()
+    except OSError as error:
+        raise AssertionError(f'Cannot read source version metadata: {build_file}') from error
+    source = re.sub(r'/\*.*?\*/|//[^\n]*', '', source, flags=re.DOTALL)
+    values = []
+    for key, literal in [('versionCode', r'([1-9][0-9]*)'),
+                         ('versionName', r"'([A-Za-z0-9][A-Za-z0-9._+-]*)'")]:
+        declarations = re.findall(r'^[ \t]*' + key + r'[ \t]+' + literal + r'[ \t]*$', source, re.MULTILINE)
+        assert len(re.findall(r'\b' + key + r'\b', source)) == 1 and len(declarations) == 1, \
+            'Invalid or ambiguous source version metadata: ' + key
+        values.append(declarations[0])
+    return tuple(values)
+
+
+def validate_package_version(badging, package, build_file=None):
+    code, name = source_package_version(build_file)
+    records = [line for line in badging.splitlines() if line.startswith('package:')]
+    assert len(records) == 1, 'APK package/version metadata missing or ambiguous'
+    record = records[0]
+    assert record.startswith(f"package: name='{package}' "), 'APK package differs from requested package'
+    for key, expected in [('versionCode', code), ('versionName', name)]:
+        values = re.findall(r"(?:^|\s)" + key + r"='([^']*)'(?=\s|$)", record)
+        assert len(re.findall(r'\b' + key + r'\b', record)) == 1 and values == [expected], \
+            f'APK version mismatch: expected {code} / {name} from source ({key})'
 
 
 def inspect(apk, tools, package, unsigned, required_kind=None):
@@ -256,7 +282,7 @@ def inspect(apk, tools, package, unsigned, required_kind=None):
         assert set(libs) == expected, f'Native ABIs differ: {set(libs)}'
         validate_private_inputs(z)
         symbols = ['open', 'close', 'width', 'height', 'advance', 'setButton', 'save',
-                   'advanceHeadless', 'readLife', 'writeLife', 'committedPayloadHash', 'setAudioEnabled', 'drainAudio']
+                   'advanceHeadless', 'advanceHeadlessBatch', 'readLife', 'writeLife', 'committedPayloadHash', 'setAudioEnabled', 'drainAudio']
         for abi, name in libs.items():
             elf = z.read(name)
             assert elf[:4] == b'\x7fELF'

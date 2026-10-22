@@ -24,7 +24,7 @@ final class EmulatorSession {
     }
 
     // A request ceiling, not a native quantum or a promise of completion.
-    static final int MAX_REPLAY_MILLIS = 60_000;
+    static final int MAX_REPLAY_MILLIS = LifeLedger.MAX_REPLAY_MILLIS;
     static int checkedReplayCompletion(int requested,int completed) {
         if(requested<=0||requested>MAX_REPLAY_MILLIS||completed<=0||completed>requested)
             throw new IllegalStateException("Invalid replay completion");
