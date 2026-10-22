@@ -269,6 +269,8 @@ public class ControlLayoutAndroidTest {
     @Test public void alwaysVisibleDisplayTapKeepsControlsAndHoldOpensSettings() throws Exception {
         apply(overlay().withControls(UiPreferences.Controls.VISIBLE));
         tapTarget();assertTrue(visible());assertFalse((Boolean)get(layout,"settingsOpen"));
+        // Settle tap feedback before starting the independent hold.
+        Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ViewConfiguration.getPressedStateDuration()));
         longTarget();assertTrue((Boolean)get(layout,"settingsOpen"));
         assertNotNull(text(layout,"Hold for settings."));
         assertEquals(0,ownerTasks);assertTrue(edges.isEmpty());
