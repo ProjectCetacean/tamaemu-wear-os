@@ -348,6 +348,9 @@ static int advance_execution(WearBackend *b,int ms,int audible,char error[160]) 
         }
         double clock=e->cmu.mclk_hz;
         unsigned idle=e->halted?cpu_skip_idle(e,10000001-steps):0;
+#ifndef TAMAEMU_CPU_BATCH_DISABLE
+        if(!idle && !audible) idle=cpu_run_batch(e,10000001-steps);
+#endif
         if(idle) steps+=idle-1;else cpu_step(e);
         if(audible && (e->tone_ev_w!=b->audio.read || e->cmu.mclk_hz!=b->audio.clock_raw)) audio_observe(b);
         /* The changing instruction belongs to the old clock segment. Flush

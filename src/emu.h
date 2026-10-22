@@ -378,7 +378,7 @@ typedef struct Emu {
     #define TRACE_RING_N 8192
     #define TRACE_RING_M (TRACE_RING_N - 1)
     uint32_t trace_ring[TRACE_RING_N];
-    int      trace_ring_pos;
+    uint32_t trace_ring_pos;
 
     /* IrDA link; NULL in standalone mode. */
     struct Link *link;
@@ -494,6 +494,7 @@ void mem_write32(Emu *e, uint32_t a, uint32_t v);
 /* cpu.c */
 void cpu_reset(Emu *e);
 void cpu_step(Emu *e);         /* one instruction (ext prefixes folded in) */
+unsigned cpu_run_batch(Emu *e, unsigned max_steps);
 /* Replay only: returns equivalent idle steps, bounded by next 256-cycle tick. */
 unsigned cpu_skip_idle(Emu *e, unsigned max_steps);
 

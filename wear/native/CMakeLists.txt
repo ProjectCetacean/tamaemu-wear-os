@@ -32,6 +32,10 @@ if(ANDROID)
     target_compile_options(tamaemu PRIVATE "$<$<CONFIG:Debug>:-O2>")
 else()
     enable_testing()
+    # Firmware-free batch contract regression, host only.
+    add_executable(test_cpu_batch test_cpu_batch.c)
+    target_link_libraries(test_cpu_batch PRIVATE tamaemu_core)
+    add_test(NAME cpu_batch COMMAND test_cpu_batch)
     add_executable(test_backend test_backend.c)
     target_compile_definitions(test_backend PRIVATE WEAR_FAULT_TEST=1)
     target_link_libraries(test_backend PRIVATE tamaemu_core ${CMAKE_DL_LIBS})
@@ -61,6 +65,10 @@ else()
     target_link_libraries(test_replay_timers PRIVATE tamaemu_core)
     add_test(NAME replay_timers COMMAND test_replay_timers)
     add_test(NAME replay_timer_dispatch COMMAND test_replay_timers --dispatch)
+    # Persistent unsigned trace counter regression, host only; never in APK.
+    add_executable(test_trace_counter test_trace_counter.c)
+    target_link_libraries(test_trace_counter PRIVATE tamaemu_core)
+    add_test(NAME trace_counter COMMAND test_trace_counter)
     # Optional actual JVM/JNI boundary regression; firmware-free and host-only.
     # JAVA_HOME can point at a portable JDK; native-only builds need no JDK.
     find_package(Java QUIET COMPONENTS Runtime Development)
