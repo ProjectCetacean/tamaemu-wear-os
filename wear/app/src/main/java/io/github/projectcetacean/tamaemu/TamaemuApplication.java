@@ -19,6 +19,43 @@ import java.util.concurrent.TimeUnit;
 
 public final class TamaemuApplication extends Application {
     private EmulatorSession session;
+    private TimeVerifier timeVerifier;
+    private final Object timeNotifications=new Object();
+    private volatile TimeVerifier.Outcome notifiedTime=TimeVerifier.Outcome.UNAVAILABLE;
+
+    private ClockSample clockSample() {
+        long boot=ClockSample.UNKNOWN_BOOT;
+        try { int value=Settings.Global.getInt(getContentResolver(),Settings.Global.BOOT_COUNT);if(value>=0)boot=value; }
+        catch(Settings.SettingNotFoundException|SecurityException unavailable) { /* Unknown boot cannot reuse proof. */ }
+        return new ClockSample(System.currentTimeMillis(),SystemClock.elapsedRealtime(),boot);
+    }
+    TimeVerifier.Outcome timeOutcome(){
+        TimeVerifier.Outcome result=timeVerifier.current();
+        timeChanged(result);
+        return result;
+    }
+    private void timeChanged(TimeVerifier.Outcome result) {
+        synchronized(timeNotifications) {
+            if(result==notifiedTime)return;
+            notifiedTime=result;
+        }
+        previewWrites.execute(()->{
+            try {TileService.getUpdater(this).requestUpdate(PetTileService.class);}
+            catch(RuntimeException|LinkageError unavailable){ /* Host refresh is best effort. */ }
+        });
+    }
+    // The existing cache executor serializes opportunistic checks independently of owner/save locks.
+    void timeOpportunity(Runnable complete) {
+        previewWrites.execute(()->{
+            verifyTime();
+            if(complete!=null)complete.run();
+        });
+    }
+    TimeVerifier.Outcome verifyTime() {
+        TimeVerifier.Outcome result=timeVerifier.check();
+        timeChanged(result);
+        return result;
+    }
     private volatile ForegroundAudio foregroundAudio;
     void configureAudio(boolean foregroundPlaying, boolean sound) {
         ForegroundAudio audio=foregroundAudio;
@@ -45,6 +82,7 @@ public final class TamaemuApplication extends Application {
 
     @Override public void onCreate() {
         super.onCreate();
+        timeVerifier=new TimeVerifier(this::clockSample,new AndroidTimeVerifier());
         // Read once at process startup: a later foreground marker belongs to this healthy process.
         setPreviewBlocked(new File(getFilesDir(), "pet.state.running").exists());
         previewPublisher = new CommittedPreviewPublisher(previewWrites,
@@ -93,6 +131,7 @@ public final class TamaemuApplication extends Application {
                 public int height(long handle) { return NativeBridge.height(handle); }
                 public void advance(long handle, int elapsed, int[] pixels) throws Exception { NativeBridge.advance(handle, elapsed, pixels); }
                 public void headless(long handle,int elapsed) throws Exception { NativeBridge.advanceHeadless(handle,elapsed); }
+                public int replay(long handle,int requested) throws Exception { return NativeBridge.replayHeadless(handle,requested); }
                 public long[] readLife(long handle) { return NativeBridge.readLife(handle); }
                 public void writeLife(long handle,long[] candidate) { NativeBridge.writeLife(handle,candidate); }
                 public byte[] committedPayloadHash(long handle) { return NativeBridge.committedPayloadHash(handle); }
@@ -104,12 +143,7 @@ public final class TamaemuApplication extends Application {
                 public short[] drain(long handle,int max){return NativeBridge.drainAudio(handle,max);}
             },()->foregroundAudio==null?null:foregroundAudio.pump,SystemClock::elapsedRealtime);
             Handler main = new Handler(Looper.getMainLooper());
-            Clock clock = () -> {
-                long boot=ClockSample.UNKNOWN_BOOT;
-                try { int value=Settings.Global.getInt(getContentResolver(),Settings.Global.BOOT_COUNT);if(value>=0)boot=value; }
-                catch(Settings.SettingNotFoundException|SecurityException unavailable) { /* UTC fallback is visibly estimated. */ }
-                return new ClockSample(System.currentTimeMillis(),SystemClock.elapsedRealtime(),boot);
-            };
+            Clock clock = this::clockSample;
             session = new EmulatorSession(nativeBackend, worker, main::post,
                     new File(getFilesDir(), "firmware.bin").getAbsolutePath(),
                     new File(getFilesDir(), "pet.state").getAbsolutePath(),clock,
@@ -132,6 +166,7 @@ public final class TamaemuApplication extends Application {
                             // Only the authoritative owner reaches this observer after successful save.
                             // Jobs cannot acknowledge a stale foreground marker; the owner blocks them.
                             setPreviewBlocked(false);
+                            timeOpportunity(null);
                             try { scheduler.reconcile(snapshot.record); }
                             catch (RuntimeException | LinkageError unavailable) { /* Cache work is independent. */ }
                             try { previewPublisher.committed(snapshot); }
@@ -164,6 +199,7 @@ public final class TamaemuApplication extends Application {
             },session::schedulerStatus);
             session.reconcileScheduler(scheduler);
         }
+        timeOpportunity(null);
         return session;
     }
 }

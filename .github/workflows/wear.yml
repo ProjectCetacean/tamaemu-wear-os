@@ -50,6 +50,9 @@ jobs:
       - name: Native tests (no firmware)
         if: github.event_name != 'workflow_dispatch'
         run: scripts/test-wear-native.sh 2>&1 | tee native-test.log
+      - name: Exact hard-HALT replay regression (no firmware)
+        if: github.event_name != 'workflow_dispatch'
+        run: bash scripts/check-wear-fast-replay.sh "$RUNNER_TEMP/wear-fast-replay" 2>&1 | tee fast-replay-test.log
       - name: Verify preinstalled Android tools
         shell: bash
         run: |
@@ -124,17 +127,18 @@ jobs:
           export JAVA_HOME="$JAVA_HOME_21_X64"
           export PATH="$JAVA_HOME/bin:$PATH"
           mkdir -p ../build/qa-input-reports
-          ./gradlew --no-daemon -PwearTestPackage=true testDebugUnitTest --tests '*AudioQaInputAndroidTest*' lintDebug 2>&1 | tee ../build/qa-input-reports/gradle.log
+          ./gradlew --no-daemon -PwearTestPackage=true testDebugUnitTest --tests '*AudioQaInputAndroidTest*' --tests '*AudioQaInputTrackProbeAndroidTest*' lintDebug 2>&1 | tee ../build/qa-input-reports/gradle.log
           python3 - <<'PY_QA_INPUT'
           import xml.etree.ElementTree as ET
           from pathlib import Path
-          report = Path('app/build/test-results/testDebugUnitTest/TEST-io.github.projectcetacean.tamaemu.AudioQaInputAndroidTest.xml')
-          suite = ET.parse(report).getroot()
-          cases = suite.findall('testcase')
-          assert int(suite.attrib['tests']) >= 13 and len(cases) >= 13, 'Expected at least 13 executed QA input cases'
-          assert all(int(suite.attrib[key]) == 0 for key in ('failures', 'errors', 'skipped')), suite.attrib
-          assert all(case.find(tag) is None for case in cases for tag in ('failure', 'error', 'skipped')), 'QA input cases must all execute successfully'
-          print(f"Audio QA input: {len(cases)} cases, zero failures/errors/skips")
+          for name, minimum in [('AudioQaInputAndroidTest', 13), ('AudioQaInputTrackProbeAndroidTest', 1)]:
+              report = Path(f'app/build/test-results/testDebugUnitTest/TEST-io.github.projectcetacean.tamaemu.{name}.xml')
+              suite = ET.parse(report).getroot()
+              cases = suite.findall('testcase')
+              assert len(cases) >= minimum and int(suite.attrib['tests']) == len(cases), f'{name}: expected executed cases'
+              assert all(int(suite.attrib[key]) == 0 for key in ('failures', 'errors', 'skipped')), suite.attrib
+              assert all(case.find(tag) is None for case in cases for tag in ('failure', 'error', 'skipped')), f'{name}: cases must all execute successfully'
+              print(f"{name}: {len(cases)} cases, zero failures/errors/skips")
           PY_QA_INPUT
       # Copy before the probe/production rebuilds reuse AGP's default report paths.
       - name: Capture audio QA input reports

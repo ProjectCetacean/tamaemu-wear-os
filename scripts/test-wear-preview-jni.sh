@@ -20,6 +20,7 @@ trap 'rm -rf "$preview_out"' EXIT
 preview_src="$root/wear/app/src/main/java/io/github/projectcetacean/tamaemu"
 "$JAVA_HOME/bin/javac" --release 8 -d "$preview_out" \
     "$preview_src/NativeBridge.java" "$preview_src/PetPreviewSnapshot.java" \
+    "$preview_src/TimeVerifier.java" "$preview_src/LifeLedger.java" \
     "$preview_src/PetPreviewStore.java" "$root/scripts/java/PreviewJniProbe.java"
 "$JAVA_HOME/bin/java" -Djava.library.path="$root/build/wear-jni-host" \
     -Dpreview.fixture.root="$preview_out" -cp "$preview_out" \

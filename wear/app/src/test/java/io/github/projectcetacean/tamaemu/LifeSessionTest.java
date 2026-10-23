@@ -73,6 +73,13 @@ public final class LifeSessionTest {
         void saved(long debt,boolean protect){backend.disk=LifeRecord.from(new long[]{1,100000,1000,4,debt,protect?1:0,4,0});backend.working=backend.disk;try{new File(dir,"pet.state").createNewFile();}catch(IOException e){throw new AssertionError(e);}}
     }
     public static void main(String[] args)throws Exception {
+        for(int closure=0;closure<3;closure++)settledJobClearsOwnedMarker(closure);
+        failedJobRetainsOwnedMarker();
+        rapidVisitDuringJobSaveRetainsCapturedPresence();
+        periodicCheckpointPreservesHeldContact();
+        inputDuringSaveWaitsForExactCandidate();
+        failedHeldCheckpointFreezesUntilRetry();
+        failedHeldCheckpointBackgroundRetryReleasesBeforeReplay();
         replayProgressPublicationHasWallTimeBound();
         delayedMainCoalescesReplayAndRespectsDeliveryTime();
         replayTransitionsBypassProgressThrottle();
@@ -82,7 +89,7 @@ public final class LifeSessionTest {
         inputStatsAndBoundaryPolicy();
         inputStatsPressureAndCancellation();
         inputStatsCheckpointAndRetry();
-        checkpointCancelsHeldContactWithoutLeakingDeadline();
+        checkpointPreservesMinimumPulseAndQueuedContact();
         acceptingSoundUsesForegroundCadence();
         foregroundCadenceTracksActualSoundAcceptance();
         cadenceConservesLifeAtCommonBoundaries();
@@ -114,6 +121,101 @@ public final class LifeSessionTest {
         recoveryObserverFailurePreservesOwnerRecovery();
         sixtySecondBackgroundRunPreservesDebtAndStops();
         System.out.println("LifeSessionTest: "+checks+" checks passed");
+    }
+    // Missing marker cleanup after a durable job settlement must fail each closure path.
+    static void settledJobClearsOwnedMarker(int closure)throws Exception {
+        Fixture f=new Fixture();f.start();File marker=new File(f.dir,"pet.state.running");
+        f.time(321);f.backend.saveOkay=false;f.session.pause();f.flush();
+        check(marker.exists()&&f.backend.handles==1,"failed pause retains marker and frozen native owner");
+        long[] candidate=f.backend.working.toArray();
+        f.backend.saveOkay=true;f.time(1000);JobLease lease=new JobLease();int[] done={0};
+        if(closure!=0)f.backend.onSlice=()->{
+            if(closure==1)f.session.cancelBackground(lease);
+            else f.worker.time+=100;
+        };
+        f.session.runBackground(lease,closure==2?1:60000,l->done[0]++);f.flush();f.worker.through(1000);
+        check(Arrays.equals(candidate,f.backend.attempted.get(3)),"job first retries the exact failed pause candidate");
+        check(f.backend.handles==0&&f.backend.diskProgress==f.backend.progress,"closure durably saves before releasing native");
+        check(f.backend.diskProgress+f.backend.disk.debtMs==1321,"closure retains consumed progress and all remaining debt");
+        check(done[0]==(closure==1?0:1),"cancel suppresses completion; other closures complete once");
+        check(!marker.exists(),"durably settled background closure must clear its owned foreground marker: "+closure);
+        f.start();check(!f.listener.states.contains(EmulatorSession.State.RECOVERY_REQUIRED),"settled owner reopens without false recovery");
+        check(marker.exists(),"foreground return owns a new running marker");
+    }
+    static void rapidVisitDuringJobSaveRetainsCapturedPresence()throws Exception {
+        Fixture f=new Fixture();f.saved(0,true);f.start();f.time(321);
+        f.backend.saveOkay=false;f.session.pause();f.flush();
+        f.time(1000);f.backend.saveOkay=true;
+        // First save retries the frozen pause; the next save settles background replay.
+        f.backend.onSave=()->f.backend.onSave=()->{
+            f.session.resume(f.listener);f.time(200);f.session.pause();
+        };
+        f.session.runBackground(new JobLease(),60000,l->{});f.flush();
+        check(f.backend.diskProgress+f.backend.disk.debtMs==521,"foreground presence captured during final job save must be durable before native closure");
+        check(f.backend.disk.elapsedMs==2521&&f.backend.handles==0,"rapid visit keeps its exact anchor then closes after pause settlement");
+        check(!new File(f.dir,"pet.state.running").exists(),"settled rapid visit clears marker only after its final save");
+    }
+    static void failedJobRetainsOwnedMarker()throws Exception {
+        Fixture f=new Fixture();f.start();File marker=new File(f.dir,"pet.state.running");
+        f.time(321);f.backend.saveOkay=false;f.backend.uncertain=true;f.session.pause();f.flush();
+        long[] candidate=f.backend.working.toArray();long progress=f.backend.progress;
+        JobLease job=new JobLease();f.time(1000);f.session.runBackground(job,1000,l->{});f.flush();
+        check(marker.exists()&&f.backend.handles==1,"uncertain failed retry retains marker and handle");
+        check(progress==f.backend.progress&&Arrays.equals(candidate,f.backend.working.toArray()),"failed retry cannot change candidate or guest");
+        f.backend.saveOkay=true;f.backend.onSave=()->f.session.resume(f.listener);
+        f.session.runBackground(new JobLease(),1000,l->{});f.flush();
+        check(marker.exists()&&f.backend.handles==1&&f.listener.status.state==LifeStatus.OwnerState.PLAYING,"rapid foreground return retains owned marker and sole native handle");
+    }
+    // Removing live keys at a routine checkpoint invents a physical UP.
+    static void periodicCheckpointPreservesHeldContact()throws Exception {
+        InputFixture f=new InputFixture();f.worker.through(25000);
+        f.session.button(0,true);f.worker.through(25000);f.worker.through(32000);
+        check(f.backend.pressed==1&&f.backend.nativeEdges.equals(Arrays.asList("0:true:25000")),"periodic save preserves a continuously held contact");
+        f.session.button(0,false);f.worker.through(32100);
+        check(f.backend.nativeEdges.equals(Arrays.asList("0:true:25000","0:false:32000")),"only physical UP ends the held contact");
+    }
+    // Save callbacks may enqueue edges, but cannot touch the frozen guest or candidate.
+    static void inputDuringSaveWaitsForExactCandidate()throws Exception {
+        InputFixture f=new InputFixture();f.worker.through(29970);f.worker.now=29980;
+        f.session.button(0,true);f.worker.through(29980);
+        f.backend.onSave=()->{
+            long[] candidate=f.backend.working.toArray();long progress=f.backend.progress;
+            f.session.button(0,false);f.session.button(1,true);f.session.button(1,false);
+            check(Arrays.equals(candidate,f.backend.working.toArray())&&progress==f.backend.progress,"input during save cannot mutate frozen candidate");
+            check(f.backend.pressed==1,"save does not synthesize an UP before physical release is processed");
+            LifeUiModel ui=new LifeUiModel();ui.setForegroundReady(true);ui.update(f.listener.status);
+            check(ui.careEnabled()&&!ui.modeEnabled()&&ui.beginModeChange()==0,"ordinary save retains touch admission while mode changes stay gated");
+        };
+        f.worker.through(30100);
+        check(f.backend.nativeEdges.equals(Arrays.asList("0:true:29980","1:true:30013","0:false:30020","1:false:30053")),"queued save-time input keeps chronology and minimum pulse: "+f.backend.nativeEdges);
+        check(f.backend.pressed==0,"all paired releases settle after save");
+    }
+    static void failedHeldCheckpointBackgroundRetryReleasesBeforeReplay()throws Exception {
+        InputFixture f=new InputFixture();f.worker.through(25000);f.session.button(0,true);f.worker.through(25000);
+        f.backend.saveOkay=false;f.worker.through(31000);
+        check(f.backend.pressed==1,"failed autosave retains held-key candidate before background retry");
+        long[] candidate=f.backend.working.toArray();f.session.pause();f.worker.through(31000);
+        check(Arrays.equals(candidate,f.backend.working.toArray()),"failed pause cannot mutate held-key candidate");
+        f.worker.now=32000;f.backend.saveOkay=true;
+        f.backend.onSlice=()->check(f.backend.pressed==0,"background retry releases saved held keys before headless replay");
+        f.session.runBackground(new JobLease(),60000,l->{});f.worker.through(32000);
+        check(f.backend.pressed==0&&f.backend.handles==0&&f.backend.diskProgress==32000,"background retry settles all time with released keys");
+    }
+    static void failedHeldCheckpointFreezesUntilRetry()throws Exception {
+        InputFixture f=new InputFixture();f.worker.through(25000);f.session.button(0,true);f.worker.through(25000);
+        f.backend.saveOkay=false;f.backend.uncertain=true;f.worker.through(31000);
+        check(f.backend.pressed==1,"failed routine save must retain its exact held-key candidate");
+        long progress=f.backend.progress;long[] candidate=f.backend.working.toArray();int edges=f.backend.nativeEdges.size();
+        f.session.button(0,false);f.session.button(1,true);f.worker.through(31500);
+        check(f.backend.progress==progress&&f.backend.nativeEdges.size()==edges&&Arrays.equals(candidate,f.backend.working.toArray()),"UP and new DOWN cannot mutate uncertain frozen save");
+        f.session.resume(f.listener);f.worker.through(31500);
+        check(f.backend.pressed==1&&f.backend.progress==progress&&Arrays.equals(candidate,f.backend.attempted.get(f.backend.attempted.size()-1)),"failed retry saves exact held-key candidate without mutation");
+        f.backend.saveOkay=true;f.session.resume(f.listener);f.worker.through(32000);
+        check(f.backend.pressed==0&&f.backend.nativeEdges.size()==2,"successful retry releases old held key exactly once before care resumes");
+        check(f.listener.status.state==LifeStatus.OwnerState.PLAYING,"settled retry resumes care");
+        Fixture reopen=new Fixture();reopen.saved(100,false);reopen.backend.onOpen=()->reopen.backend.pressed=7;
+        reopen.backend.onSlice=()->check(reopen.backend.pressed==0,"reopen releases all saved held keys before replay");reopen.start();
+        check(reopen.backend.pressed==0,"saved held keys remain released in reopened care");
     }
     static final class QueuedMain implements java.util.concurrent.Executor {
         final java.util.ArrayDeque<Runnable> tasks=new java.util.ArrayDeque<>();
@@ -370,7 +472,7 @@ public final class LifeSessionTest {
         f.worker.now=30;f.session.button(0,true);f.worker.through(30); //refused DOWN; its UP waits across checkpoint
         f.backend.saveOkay=false;
         f.worker.now=30000;f.session.button(1,true);f.session.button(1,false);f.worker.through(30000);
-        check(f.listener.status.state==LifeStatus.OwnerState.SAVE_FAILED&&f.backend.pressed==0,"fresh checkpoint releases before save despite throwing input observer");
+        check(f.listener.status.state==LifeStatus.OwnerState.SAVE_FAILED&&f.backend.pressed==0,"elapsed physical pulse is released before failed save despite throwing input observer");
         LifeOwner.InputStats frozen=observer.last();
         check(frozen.canceledBeforeDelivery==1&&frozen.pending==0&&frozen.heldMask==0,"fresh checkpoint accounts queued unconsumed DOWN once");
         long[] candidate=f.backend.working.toArray();long progress=f.backend.progress;int callbacks=observer.events.size();
@@ -388,19 +490,19 @@ public final class LifeSessionTest {
         check(observer.last().ownerDownAttempts==5&&observer.last().admitted==4&&observer.last().deliveryRefusedNativeHeld==1
                 &&observer.last().deliveredNativeDowns==2&&observer.last().canceledBeforeDelivery==1,"cumulative counts partition attempts across checkpoint and retry");
     }
-    static void checkpointCancelsHeldContactWithoutLeakingDeadline()throws Exception {
+    static void checkpointPreservesMinimumPulseAndQueuedContact()throws Exception {
         StatsObserver observer=new StatsObserver();InputFixture f=new InputFixture(new Model(),observer);
         f.worker.through(29970);f.worker.now=29980;f.session.button(0,true);f.worker.through(29980);
         f.worker.now=29990;f.session.button(0,false);f.worker.through(29990);
         f.worker.now=30000;f.session.button(1,true);f.session.button(1,false);f.worker.through(30000);
-        check(f.backend.nativeEdges.equals(Arrays.asList("0:true:29980","0:false:30000")),"existing fresh-checkpoint cancellation may truncate a hold before40ms");
-        check(observer.last().deliveredNativeDowns==1&&observer.last().canceledBeforeDelivery==1
-                &&observer.last().heldMask==0,"checkpoint keeps delivered and canceled-before-delivery disjoint");
-        f.worker.now=30010;f.session.button(0,true);f.worker.through(30010);f.worker.through(30030);
-        check(f.backend.pressed==1,"canceled old releaseAt30020 cannot release new ID");
-        f.worker.now=30060;f.session.button(0,false);f.worker.through(30100);observer.valid();
-        check(f.backend.pressed==0&&observer.last().pending==0&&observer.last().heldMask==0,"new checkpoint-era contact releases through its own UP");
+        check(f.backend.nativeEdges.equals(Arrays.asList("0:true:29980","1:true:30000")),"checkpoint retains the short pulse and admits the queued independent contact");
+        check(observer.last().deliveredNativeDowns==2&&observer.last().canceledBeforeDelivery==0
+                &&observer.last().heldMask==3,"checkpoint preserves both live deadlines without invented cancellation");
+        f.worker.through(30100);observer.valid();
+        check(f.backend.nativeEdges.equals(Arrays.asList("0:true:29980","1:true:30000","0:false:30020","1:false:30040")),"both physical UPs retain their own40ms minimum across checkpoint");
+        check(f.backend.pressed==0&&observer.last().pending==0&&observer.last().heldMask==0,"checkpoint-era contacts release exactly once");
     }
+
     static final class CadenceModel extends Model {
         final boolean accepting;
         CadenceModel(boolean accepting){this.accepting=accepting;}
@@ -606,7 +708,7 @@ public final class LifeSessionTest {
                 public void button(long h,int key,boolean down){if(down)pressed|=1<<key;else pressed&=~(1<<key);}
                 public long[] readLife(long h){return life.clone();}public void writeLife(long h,long[] a){life=a.clone();}
                 public byte[] committedPayloadHash(long h){return new byte[32];}
-                public boolean save(long h){check(pressed==0,"checkpoint releases inputs");saves++;worker.now+=latency;return true;}
+                public boolean save(long h){check(pressed==(saves==0?0:1),"ordinary slow checkpoints preserve physical held contact");saves++;worker.now+=latency;return true;}
             }
             SlowBackend backend=new SlowBackend();Listener listener=new Listener();
             EmulatorSession session=new EmulatorSession(backend,worker,Runnable::run,"rom",
@@ -627,6 +729,9 @@ public final class LifeSessionTest {
             check(listener.status.state==LifeStatus.OwnerState.PLAYING,"periodic slow saves preserve eventual gameplay");
             check(backend.progress+listener.status.debtMs==listener.status.record.elapsedMs,"every elapsed millisecond is advanced or retained as debt");
             check(worker.now-listener.status.record.elapsedMs<=33,"only next frame interval remains unaccounted");
+            check(backend.pressed==1,"slow periodic saves never invent physical UP");
+            session.button(0,false);worker.through(worker.now);
+            check(backend.pressed==0,"physical UP ends the slow-save contact");
             System.out.println("slow-save mode="+(protect?"Protected":"Normal")+" latency="+latency+" saves="+backend.saves+" elapsed="+worker.now+" progress="+backend.progress);
         }
     }

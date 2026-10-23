@@ -4,8 +4,14 @@
  */
 
  #include "emu.h"
+#include <limits.h>
+
 #include <stdlib.h>
 #include <string.h>
+
+/* Preserve the legacy raw desktop state layout when changing counter kind. */
+_Static_assert(sizeof(int) == sizeof(uint32_t), "legacy trace counter size");
+_Static_assert(_Alignof(int) == _Alignof(uint32_t), "legacy trace counter alignment");
 
 static uint32_t sext(uint32_t v, int bits)
 {
@@ -701,6 +707,41 @@ void cpu_step(Emu *e)
         e->pending_irq = 0;
     }
     step_one(e, 0);
+}
+
+/* Literal active steps only. Configuration/debug/peer fields below have no
+ * guest-write setters. mem_write8 can arm post_ir_trace; MMIO can raise an
+ * IRQ/wake or change MCLK, so these are checked after each atomic step_one.
+ * pending_level alone is deliberately not an interrupt admission condition. */
+unsigned cpu_run_batch(Emu *e, unsigned max_steps)
+{
+    if (!max_steps || e->stopped || e->halted || e->pending_irq || e->wake_req ||
+        e->cycles - e->last_tick >= 256 || e->n_pc_hook || e->post_ir_trace ||
+        (e->dev.bingo_open_pc && e->auto_touch) ||
+        e->trace || e->io_log || e->ir_log || e->tone_log || e->btn_log ||
+        e->nfc_log || e->nfc_log_rf || e->lcd.log || e->watch_hi ||
+        e->rwatch_n || e->fwatch_hi || e->call_nranges ||
+        e->link || e->auto_link || e->nfc_peer || e->nfc_vpeer)
+        return 0;
+    /* Leave a full 28-bit bus of cycle headroom, including recursively nested
+     * register .d slots. The unsigned trace counter may wrap. Refuse mappings
+     * at the bus end so nested sequential slot fetches cannot wrap into an
+     * unbounded mapped chain. No prefetch. */
+    if (pc_mapped(e, 0x0FFFFFFEu) || pc_mapped(e, 0x0FFFFFFFu) ||
+        e->cycles > UINT64_MAX - 0x10000000u)
+        return 0;
+    double clock = e->cmu.mclk_hz;
+    unsigned steps = 0;
+    do {
+        step_one(e, 0);
+        steps++;
+        if (e->stopped || e->halted || e->pending_irq || e->wake_req ||
+            e->post_ir_trace || e->cmu.mclk_hz != clock ||
+            e->cycles - e->last_tick >= 256 ||
+            e->cycles > UINT64_MAX - 0x10000000u)
+            break;
+    } while (steps < max_steps);
+    return steps;
 }
 
 /* Wear replay, 2026-10-16: combine only idle returns before the next tick.

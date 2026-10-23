@@ -186,6 +186,32 @@ public class LifeSettingsAndroidTest {
         assertEquals("Only pause enqueues owner work",1,workerTasks);
     }
 
+    @Test public void currentProofClearsActionButKeepsEarlierEstimateAndInvalidDate() throws Exception {
+        TimeVerifierTest.Local local=new TimeVerifierTest.Local();
+        TimeVerifier verifier=new TimeVerifier(local,new TimeVerifierTest.Source(local));verifier.check();
+        set(activity.getApplication(),"timeVerifier",verifier);
+        activity.state(EmulatorSession.State.RUNNING);
+        LifeRecord record=LifeRecord.from(new long[]{1,1800000000000L,1000,1,900,1,7,1});
+        LifeStatus historical=new LifeStatus(record,record,LifeStatus.OwnerState.PLAYING,1800000000000L,"",false);
+        activity.lifeStatus(historical);
+        button(layout,activity.getString(R.string.ui_settings)).performClick();
+        assertNotNull(text(layout,activity.getString(R.string.life_clock_estimated)));
+        assertEquals("MATCH hides the actionable notice",View.GONE,text(layout,TimeVerifier.notice(TimeVerifier.Outcome.UNAVAILABLE)).getVisibility());
+        assertSame(historical,((LifeUiModel)get(activity,"lifeUi")).status());assertEquals(1,historical.clockQuality);
+        assertEquals(0,workerTasks);
+        local.wall+=1001;activity.lifeStatus(historical);
+        assertEquals(View.VISIBLE,text(layout,TimeVerifier.notice(TimeVerifier.Outcome.UNAVAILABLE)).getVisibility());
+        local.wall-=1001;activity.lifeStatus(historical);
+        assertEquals("old wall value cannot revive proof",View.VISIBLE,text(layout,TimeVerifier.notice(TimeVerifier.Outcome.UNAVAILABLE)).getVisibility());
+        TimeVerifierTest.Source source=new TimeVerifierTest.Source(local);source.offset=9000;
+        verifier=new TimeVerifier(local,source);verifier.check();set(activity.getApplication(),"timeVerifier",verifier);activity.lifeStatus(historical);
+        assertEquals(View.VISIBLE,text(layout,TimeVerifier.notice(TimeVerifier.Outcome.MISMATCH)).getVisibility());
+        source.offset=0;local.advance(900000);verifier.check();
+        activity.lifeStatus(new LifeStatus(record,record,LifeStatus.OwnerState.PLAYING,1,"",false));
+        assertEquals(View.VISIBLE,text(layout,"Saved time needs checking").getVisibility());
+        assertEquals(0,workerTasks);
+    }
+
     private boolean keepsScreenOn() {
         return (activity.getWindow().getAttributes().flags&android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0;
     }

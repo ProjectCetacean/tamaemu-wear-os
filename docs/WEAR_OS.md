@@ -1,10 +1,10 @@
 # Tamaemu on Wear OS
 
-Version `0.2.0-wear.10` is unreleased. The app uses compatible, user-supplied iD L firmware; see [release notes](RELEASE_NOTES.md) for current changes.
+Candidate `0.2.0-wear.13` (version code 13) is unreleased. The app uses compatible, user-supplied iD L firmware; see [release notes](RELEASE_NOTES.md) for current changes.
 
 ## Controls and settings
 
-Use the on-screen A/B/C buttons. Hold the display area to open **Settings**; choose **Done** or Back to return. With **Retractable** controls, tap the display area to hide or reveal them. A display gesture during a held A/B/C contact is ignored. Opening Settings or leaving care releases held inputs.
+Use the on-screen A/B/C buttons. Controls provide result feedback, and hints reflect the current mode. Hold the display area to open **Settings**; choose **Done** or Back to return. With **Retractable** controls, tap the display area to hide or reveal them. A display gesture during a held A/B/C contact is ignored. Opening Settings, leaving care or losing window focus releases held inputs. Routine autosaves preserve held A/B/C contacts and minimum press duration through release. A visible disabled button consumes touches without passing them to display gestures.
 
 Settings include:
 
@@ -29,15 +29,17 @@ Sound plays only while the app is in the foreground with audio focus. Away repla
 
 **Protected** pauses future away-time accumulation. Existing owed time must finish before switching modes, and a mode change takes effect only after its checkpoint saves. Foreground time still advances. Protected provides no automatic care or harm prevention.
 
-Catch-up batches idle CPU work and timer comparisons while preserving elapsed time and save behavior. Repeated progress updates are limited to 10 per second; state and error messages are not delayed by that limit. On reopening, care resumes after required replay and saving finish.
+Catch-up processes saved away time while preserving the pet's aging and events. On reopening, care resumes after required replay and saving finish. Catch-up duration depends on the actual work required and the watch. Repeated progress updates are limited to 10 per second; state and error messages are not delayed by that limit.
 
 Accounting uses elapsed time within a known boot and nonnegative UTC elapsed time across reboot or an unavailable boot clock. Forward clock changes can add aging. Backward changes add no new time and keep existing owed time.
 
-If saving fails, keep the app and its files intact, free storage, then use **Retry**. Recovery after an unconfirmed session returns to the last durable checkpoint and can lose recent input. Do not uninstall or clear app data to resolve a save or recovery problem.
+The app automatically compares current watch UTC with Android's cached network-time estimate opportunistically on API 33 or later. A match removes the actionable clock notice without manual acknowledgment; earlier estimated away time and owed time remain. API 26 through 32, or a missing estimate, show a neutral unavailable status. The estimate does not certify accuracy or guarantee a fresh sync, and the check does not set the pet's clock. Physical API behavior and Tile-host updates still need watch validation.
+
+If saving fails, emulation stays frozen and **Retry** saves the same pending checkpoint. Keep the app and its files intact, free storage, then use **Retry**. A successful background retry clears the session marker only after the checkpoint is durable. Recovery after an unconfirmed session returns to the last durable checkpoint and can lose recent input. Do not uninstall or clear app data to resolve a save or recovery problem.
 
 ## Saved-checkpoint Tile
 
-Add Tamaemu through the watch's Tile picker. The Tile shows the full original LCD from the last verified save. Check its saved time to see how old the image is. Tap it to open the app. The image may show a clock or menu. If no trusted save is available, the Tile shows a message instead.
+Add Tamaemu through the watch's Tile picker. The Tile shows the full original LCD from the last verified save. The saved caption always includes the time and full localized date with year, so a cached layout remains unambiguous across day and year changes. Tap it to open the app. The image may show a clock or menu. If no trusted save is available, the Tile shows a message instead.
 
 The Tile omits the catch-up warning derived from saved debt, which can include a small remainder from closing the app. Protected and clock-check notices remain. Its saved time still describes the checkpoint, not current progress.
 
@@ -70,6 +72,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 python3 -m unittest discover -s scripts/tests -v
 python3 scripts/check-public-hygiene.py
 scripts/test-wear-native.sh
+bash scripts/check-wear-fast-replay.sh /tmp/tamaemu-fast-replay
 scripts/test-wear-jni.sh
 scripts/test-wear-preview-jni.sh
 scripts/test-wear-java.sh
@@ -131,7 +134,7 @@ python3 scripts/wear-device.py --serial WATCH_SERIAL import-rom /path/to/local-f
 
 Import verifies the complete size and hash locally, refuses an existing firmware target and preserves save state. A failed transfer leaves its target for diagnosis; do not delete it without understanding the failure. Routine updates do not require importing firmware again. Firmware, backups, captures and signing material belong only in local ignored storage.
 
-Launch the app and check display, input, pause/save and cold-reopen continuity. Complete firmware setup choices yourself. Wear 10 reads earlier Wear checkpoint formats and writes version 4, which retains the expanded RAM used by the updated core. Earlier Wear builds cannot read version 4; rollback requires the matching old app and old save with a separate restore plan. Version 3 migration and cold process reopen were verified on one existing watch checkpoint; see [verification](VERIFICATION.md#watch-testing) for the test limits. Uninstalling, clearing data or forcing a downgrade can destroy the pet.
+Launch the app and check display, input, pause/save and cold-reopen continuity. Complete firmware setup choices yourself. Wear 10 and later read earlier Wear checkpoint formats and read and write version 4, which retains the expanded RAM used by the updated core. Builds before Wear 10 cannot read version 4; rollback requires the matching old app and old save with a separate restore plan. Version 3 migration and cold process reopen were verified on one existing watch checkpoint; see [verification](VERIFICATION.md#watch-testing) for the test limits. Uninstalling, clearing data or forcing a downgrade can destroy the pet.
 
 ## Troubleshooting
 

@@ -121,6 +121,15 @@ final class ForegroundAudio {
                     +" startThresholdRequested="+requested+" bufferFrames="+buffer+" capacityFrames="+capacity
                     +" performanceMode="+performance+" routeId="+route+" platformUnderruns="+platformUnderruns;
         }
+        // Read-only QA observations. Normal playback never calls these methods.
+        long qaRawHead(){return Integer.toUnsignedLong(track.getPlaybackHeadPosition());}
+        int[] qaGrant(){
+            AudioDeviceInfo device=track.getRoutedDevice();
+            return new int[]{Build.VERSION.SDK_INT>=31?track.getStartThresholdInFrames():-1,
+                    track.getBufferSizeInFrames(),track.getBufferCapacityInFrames(),track.getPerformanceMode(),
+                    device==null?-1:device.getId(),device==null?-1:device.getType(),track.getUnderrunCount(),
+                    track.getPlayState(),Build.VERSION.SDK_INT>=31?1:0,track.getSampleRate()};
+        }
         public void suspend(){if(track!=null){track.pause();track.flush();occupancy.reset(track.getPlaybackHeadPosition());}}
         public void resume(){if(track!=null){refreshGrant();track.play();}}
         public void stop(){

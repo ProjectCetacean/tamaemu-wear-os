@@ -15,10 +15,10 @@ final class LifeUiModel {
     }
     int selectedMode() { return selected; }
     boolean careEnabled() {
-        return foregroundReady && pendingRequest == 0 && status != null && status.state == LifeStatus.OwnerState.PLAYING
-                && !status.saving;
+        return foregroundReady && pendingRequest == 0 && status != null
+                && (status.state == LifeStatus.OwnerState.PLAYING || status.inputContinuity);
     }
-    boolean modeEnabled() { return careEnabled() && selected >= 0 && status.debtMs == 0; }
+    boolean modeEnabled() { return careEnabled() && selected >= 0 && status.debtMs == 0 && !status.saving; }
     boolean modeRejected() { return rejected; }
     boolean modePending() { return pendingRequest != 0; }
     long beginModeChange() {

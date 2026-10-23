@@ -2,8 +2,8 @@ package io.github.projectcetacean.tamaemu;
 import java.util.*;
 public final class AudioBackendTest {
  static final class Guest implements EmulatorSession.Backend {
-  int rendered,headless,saves,buttons;public long open(String r,String s){return 7;}public void close(long h){}public int width(long h){return 1;}public int height(long h){return 1;}
-  public void advance(long h,int ms,int[] p){rendered+=ms;p[0]=123;}public void headless(long h,int ms){headless+=ms;}
+  int rendered,headless,saves,buttons;Runnable during;boolean throwing;public long open(String r,String s){return 7;}public void close(long h){}public int width(long h){return 1;}public int height(long h){return 1;}
+  public void advance(long h,int ms,int[] p){rendered+=ms;p[0]=123;if(during!=null)during.run();if(throwing)throw new IllegalStateException("guest failed");}public void headless(long h,int ms){headless+=ms;}
   public void button(long h,int b,boolean d){buttons++;}public boolean save(long h){saves++;return true;}
  }
  /** Guest PCM script: silent, then a tone 480 frames into the second batch after the applied input. */
@@ -124,6 +124,71 @@ public final class AudioBackendTest {
    AudioPumpTest.conserved(f.pump.latency().summary(),"invalid transport bridge");
   }
  }
+ // Stale focus or supplier identity must reject both the elapsed request and its detached PCM.
+ static void completedAdvanceEpochsAndErrors()throws Exception {
+  for(String mode:new String[]{"focus","replacement","throw","drain","enable","null","empty","short","oversized","headless","reopen"}){
+   AudioPumpTest.Fixture f=new AudioPumpTest.Fixture(),other=new AudioPumpTest.Fixture();
+   f.pump.configure(true);other.pump.configure(true);Guest guest=new Guest();AudioPump[] selected={f.pump};int[] drains={0};
+   AudioBackend.NativeAudio nativeAudio=new AudioBackend.NativeAudio(){
+    public void enabled(long h,boolean on){if(mode.equals("enable"))throw new IllegalStateException("enable failed");}
+    public short[] drain(long h,int max){drains[0]++;if(mode.equals("drain"))throw new IllegalStateException("drain failed");
+     if(mode.equals("null"))return null;if(mode.equals("empty"))return new short[0];
+     return new short[mode.equals("oversized")?9601:mode.equals("short")?1:768];}
+   };
+   AudioBackend bridge=new AudioBackend(guest,nativeAudio,()->selected[0],()->f.now);
+   if(mode.equals("focus"))guest.during=()->{f.pump.configure(false);f.pump.configure(true);};
+   if(mode.equals("replacement"))guest.during=()->selected[0]=other.pump;
+   guest.throwing=mode.equals("throw");
+   try{bridge.advance(7,16,new int[1]);AudioPumpTest.check(!guest.throwing,"guest error propagated");}
+   catch(IllegalStateException expected){AudioPumpTest.check(guest.throwing,"only guest failure escapes");}
+   f.run();other.run();AudioPump.Summary summary=f.pump.latency().summary();
+   boolean real=mode.equals("short")||mode.equals("headless")||mode.equals("reopen");
+   AudioPumpTest.check(summary.offeredFrames==(real?(mode.equals("short")?1:768):0),"only eligible literal PCM is offered "+mode+": "+summary.line());
+   AudioPumpTest.check(summary.onsets==0,"no invented onset "+mode);
+   if(mode.equals("headless")){bridge.headless(7,100);f.run();}
+   if(mode.equals("reopen")){bridge.open("rom","save");f.run();AudioPumpTest.check(f.output.stops==1,"reopen retires old audio");}
+   AudioPumpTest.check(bridge.save(7)&&guest.rendered==16,"guest progress/save survive audio observation "+mode);
+   AudioPumpTest.conserved(f.pump.latency().summary(),"backend epoch "+mode);
+  }
+ }
+ /** Expected focus loss already ends the PCM epoch, but retains its legitimate gain callback. */
+ static void retainedFocusSurvivesUnfocusedAdvance()throws Exception {
+  AudioPumpTest.Fixture f=new AudioPumpTest.Fixture();f.pump.configure(true);
+  Guest guest=new Guest();AudioBackend bridge=new AudioBackend(guest,new Tone(1,768),()->f.pump,()->f.now);
+  bridge.advance(7,16,new int[1]);f.run();AudioPump.Focus focus=f.output.focus;
+  bridge.open("rom","save");f.run(); // This reopens an existing producer, so establish its new request.
+  bridge.advance(7,16,new int[1]);f.run();focus=f.output.focus;
+  long oldToken=f.pump.token(),offered=f.pump.latency().summary().offeredFrames;
+  focus.changed(false);f.run();
+  bridge.advance(7,33,new int[1]);bridge.advance(7,33,new int[1]);f.run();
+  AudioPumpTest.check(f.pump.latency().summary().offeredFrames==offered,"unfocused requests donate no PCM");
+  focus.changed(true);f.run();
+  AudioPumpTest.check(bridge.soundAccepting(),"retained focus gain remains effective after unfocused advances");
+  AudioPumpTest.check(f.pump.offerCompletedAdvance(oldToken,100,new short[768])<0,"old producer cannot donate to regained focus");
+  bridge.advance(7,16,new int[1]);f.run();
+  AudioPumpTest.check(f.pump.latency().summary().offeredFrames==offered+768,"regained producer publishes its own PCM");
+  final AudioPump.Focus retained=focus;guest.during=()->{retained.changed(false);retained.changed(true);};
+  bridge.advance(7,16,new int[1]);f.run();guest.during=null;
+  AudioPumpTest.check(f.pump.latency().summary().offeredFrames==offered+768,"mid-call focus race rejects detached old PCM");
+  retained.changed(false);f.run();retained.changed(true);f.run();
+  AudioPumpTest.check(bridge.soundAccepting(),"mid-call rejection also retains legitimate focus request");
+  bridge.advance(7,16,new int[1]);f.run();
+  AudioPumpTest.check(f.pump.latency().summary().offeredFrames==offered+1536,"new epoch resumes after mid-call rejection");
+ }
+ /** Empty drains and zero-time save captures cannot erase the preceding audible silence/admission. */
+ static void emptyAndZeroCapturePreserveAdmission()throws Exception {
+  AudioPumpTest.Fixture f=new AudioPumpTest.Fixture();f.pump.configure(true);int[] call={0};
+  AudioBackend bridge=new AudioBackend(new Guest(),new AudioBackend.NativeAudio(){
+   public void enabled(long h,boolean e){}public short[] drain(long h,int max){call[0]++;
+    if(call[0]==2)return new short[0];short[] pcm=new short[768];if(call[0]==3)pcm[0]=9;return pcm;}
+  },()->f.pump,()->f.now);
+  bridge.advance(7,16,new int[1]);f.run();bridge.inputApplied(7,0,true,0);
+  bridge.advance(7,0,new int[1]);bridge.save(7);bridge.advance(7,16,new int[1]);f.run();
+  AudioPumpTest.check(f.pump.latency().summary().offeredFrames==768&&call[0]==2,"empty and render do not invent batches");
+  bridge.advance(7,16,new int[1]);f.run();
+  AudioPump.Onset onset=f.pump.latency().lastOnset();
+  AudioPumpTest.check(onset!=null&&onset.correlated&&onset.sequence==2,"empty and capture retain real admission until actual onset");
+ }
  public static void main(String[] args)throws Exception {
   Guest guest=new Guest();AudioPumpTest.Fixture f=new AudioPumpTest.Fixture();int[] enabled={0},drains={0};boolean[] fail={false};
   AudioBackend bridge=new AudioBackend(guest,new AudioBackend.NativeAudio(){
@@ -135,10 +200,19 @@ public final class AudioBackendTest {
   bridge.advance(7,0,pixels);f.run();AudioPumpTest.check(drains[0]==1&&enabled[0]==1,"zero-time render neither drains nor resets phase");
   bridge.advance(7,20,pixels);bridge.headless(7,100);f.run();AudioPumpTest.check(enabled[0]==-1&&drains[0]==2&&f.output.writes.size()==1&&guest.headless==100,"headless drops pending audio");
   fail[0]=true;bridge.advance(7,20,pixels);bridge.button(7,1,true);AudioPumpTest.check(bridge.save(7)&&guest.saves==1&&guest.buttons==1&&guest.rendered==80,"native audio failure cannot fail guest input or checkpoint");
+  completedAdvanceEpochsAndErrors();emptyAndZeroCapturePreserveAdmission();
   onsetMeasuredFromAppliedInput();
   unavailableSoundObservationKeepsGuestUsable();
   invalidTransportGrantKeepsGuestUsable();
   Map<String,Edge> edges=new LinkedHashMap<>();
+  edges.put("retainedFocusSurvivesUnfocusedAdvance",AudioBackendTest::retainedFocusSurvivesUnfocusedAdvance);
+  edges.put("actualCallerReplayAndOmission",()->Pipeline.main(new String[]{"all"}));
+  edges.put("repeatedActualCallerReplayAndOmission",Pipeline::repeated);
+  edges.put("actualCallerMissingPcm",Pipeline::missingPcm);
+  edges.put("trimsRespectPhysicalPlayback",Pipeline::trimsRespectPhysicalPlayback);
+  edges.put("shortStallsKeepInitialHealthyPhase",Pipeline::shortStallsKeepInitialHealthyPhase);
+  edges.put("boundaryRefillRestarts",()->Pipeline.restartAndDelayedHead(false));
+  edges.put("delayedHeadRetainsQuietProof",()->Pipeline.restartAndDelayedHead(true));
   edges.put("releaseAfterToneKeepsNextPressCorrelated",AudioBackendTest::releaseAfterToneKeepsNextPressCorrelated);
   edges.put("releaseDuringToneStaysCorrelated",AudioBackendTest::releaseDuringToneStaysCorrelated);
   edges.put("releaseBeforeOnsetStaysUncorrelated",AudioBackendTest::releaseBeforeOnsetStaysUncorrelated);
@@ -153,4 +227,301 @@ public final class AudioBackendTest {
   if(!failed.isEmpty())throw new AssertionError("AudioBackendTest failed: "+failed);
   System.out.println("AudioBackendTest: 6 rendered, zero-time, headless, bounded and failure isolation contracts, safe sound observation, plus "+edges.size()+" press/release edge tests passed");
  }
+
+ // Permanent actual-caller regression: request timing and emitted waveforms are independent of the pump.
+ static final class Pipeline {
+    static void require(boolean ok,String why) { if(!ok)throw new AssertionError(why); }
+    static final int RATE=48, END=6500, TONE=4800;
+    static final class Timer {
+        final long due;final Runnable task;boolean cancelled;
+        Timer(long due,Runnable task){this.due=due;this.task=task;}
+    }
+    static final class Samples {
+        final short[] data=new short[500000];int size;
+        void add(short v){data[size++]=v;}
+        boolean same(Samples b){return size==b.size&&Arrays.equals(Arrays.copyOf(data,size),Arrays.copyOf(b.data,b.size));}
+        short[] notes(){int a=0,b=size;while(a<b&&data[a]==0)a++;while(b>a&&data[b-1]==0)b--;return Arrays.copyOfRange(data,a,b);}
+    }
+    /** Implements only the guest/audio methods modeled by AudioBackendTest. */
+    static final class Source implements EmulatorSession.Backend,AudioBackend.NativeAudio {
+        String loss="";boolean lost;long missing;int tone=TONE;final boolean variation;final Samples expected=new Samples();
+        long guest,emitted;boolean enabled;short[] ready=new short[0];
+        Source(boolean variation){this.variation=variation;}
+        public long open(String rom,String save){return 7;}
+        public void close(long h){}
+        public int width(long h){return 1;}
+        public int height(long h){return 1;}
+        public void button(long h,int b,boolean down){}
+        public boolean save(long h){return true;}
+        public void headless(long h,int ms){guest+=ms;}
+        public void enabled(long h,boolean value){enabled=value;}
+        // Synthetic cumulative timing: borrow 64 frames in each 99 ms cycle's middle third,
+        // repay them in its last third. This is stimulus, never a pump oracle.
+        long endpoint(long ms){long phase=ms%99;return ms*RATE+(variation&&phase>=33&&phase<66?64:0);}
+        public void advance(long h,int ms,int[] pixels){
+            require(ms>=0&&ms<=100,"bounded logical guest request");pixels[0]=123;
+            if(ms==0)return;
+            long from=endpoint(guest);guest+=ms;long to=endpoint(guest);
+            ready=enabled?new short[(int)(to-from)]:new short[0];
+            for(int i=0;i<ready.length;i++){
+                long frame=from+i;
+                // Three unequal note spans and short zero gaps; sample identities vary.
+                long x=frame-tone*RATE;
+                short v=(short)(x>=0&&x<7776&&!(x>=1536&&x<1968)&&!(x>=4512&&x<5088)?1+(x%30000):0);
+                ready[i]=v;
+            }
+        }
+        public short[] drain(long h,int max){require(ready.length<=max,"source drain fits actual bound");short[] result=ready;ready=new short[0];
+            if(!lost&&!loss.isEmpty()&&guest>=2000){lost=true;int keep=loss.equals("empty")?0:result.length/2;
+                missing=result.length-keep;result=Arrays.copyOf(result,keep);}
+            for(short v:result)expected.add(v);emitted+=result.length;return result;}
+    }
+    static final class Rig {
+        long now,nextOwner=16,lastAccounted,debt,skipped,replayTurn=-1,lateUntil;
+        final int gap,head;final boolean omission,stall,late;boolean repeat;long secondTrim;boolean checkTrueTrim;
+        boolean anyDataRestart,syntheticDelay;int firstRefillMs;
+        final ArrayDeque<Runnable> tasks=new ArrayDeque<>();final List<Timer> timers=new ArrayList<>();
+        final Source source;final Sink sink;final AudioPump pump;final AudioBackend backend;
+        long minResidence=Long.MAX_VALUE,maxResidence,firstTrimAt=-1;int lateUnderruns;
+        Rig(boolean varied,int head,int gap,boolean stall,boolean omission,boolean late){
+            this.gap=gap;this.head=head;this.stall=stall;this.omission=omission;this.late=late;
+            source=new Source(varied);sink=new Sink(this);
+            pump=new AudioPump(tasks::add,(delay,task)->{Timer t=new Timer(now+delay,task);timers.add(t);return ()->t.cancelled=true;},()->now,()->sink);
+            backend=new AudioBackend(source,source,()->pump,()->now);pump.configure(true);
+        }
+        void runTasks(){int n=0;while(!tasks.isEmpty()){require(++n<1000,"executor finite");tasks.remove().run();}}
+        void retries(){
+            for(;;){Timer first=null;for(Timer t:timers)if(!t.cancelled&&t.due<=now&&(first==null||t.due<first.due))first=t;
+                if(first==null)break;first.cancelled=true;first.task.run();runTasks();}
+        }
+        void owner()throws Exception {
+            debt+=now-lastAccounted;lastAccounted=now;
+            int quantum=(int)Math.min(100,debt);
+            if(stall&&now==2200&&firstRefillMs>0)quantum=Math.min(quantum,firstRefillMs);
+            if(omission&&(now==2200||repeat&&now==4200)){skipped+=debt-quantum;debt=quantum;}
+            backend.advance(7,quantum,new int[1]);debt-=quantum;
+            require(source.guest+skipped+debt==now,"owner no-skip ledger except deliberate omitted requests");
+            if(debt>0)replayTurn=now+gap;
+            else {replayTurn=-1;nextOwner=now+16;backend.advance(7,0,new int[1]);}
+        }
+        void run()throws Exception {
+            for(int at=1;at<=(repeat?8500:END)+700;at++){
+                now=at;sink.advance();
+                boolean blocked=stall&&(at>=2000&&at<2200||repeat&&at>=4000&&at<4200);
+                if(repeat&&at==4000)secondTrim=pump.latency().summary().trimmedFrames;
+                if(at<=(repeat?8500:END)&&!blocked){
+                    boolean due=replayTurn>=0?at>=replayTurn:at>=nextOwner;
+                    if(late&&at>=(repeat?6000:4000)&&at<(repeat?6032:4032))due=false;
+                    if(due)owner();
+                }
+                runTasks();retries();
+                AudioPump.Summary s=pump.latency().summary();
+                if(firstTrimAt<0&&s.trimmedFrames>0)firstTrimAt=now;
+                if(checkTrueTrim&&s.trimmedFrames>0){
+                    // Independent physical oracle: healthy playback starts at 64ms, after four
+                    // 16ms requests cross the 2880-frame threshold. Sink consumption is exact.
+                    long excess=now*RATE-sink.consumed-64L*RATE-source.missing-skipped*RATE;
+                    require(s.trimmedFrames<=excess+1,"trim exceeds true outstanding excess at="+now
+                            +" trimmed="+s.trimmedFrames+" allowed="+excess+" trueHead="+sink.consumed);
+                }
+                if(stall&&at<3200)require(s.trimmedFrames==0,"one full second played quiet after stall required");
+                if(repeat&&at>=4000&&at<5200)require(s.trimmedFrames==secondTrim,"second stall needs its own played quiet second");
+                if(at>=(repeat?6500:4300)&&at<=(repeat?6850:4650)){long residence=s.pendingFrames+sink.held();minResidence=Math.min(minResidence,residence);maxResidence=Math.max(maxResidence,residence);}
+                if(at==(repeat?8500:END))lateUnderruns=sink.underruns;
+            }
+            AudioPump.Summary s=pump.latency().summary();
+            require(s.offeredFrames==s.writtenFrames+s.pendingFrames+s.inflightFrames+s.trimmedFrames+s.droppedFrames+s.expiredFrames+s.flushedFrames,"pump conservation");
+            require(s.offeredFrames==source.emitted&&source.emitted==source.expected.size,"only actual emitted frames offered");
+            require(s.writtenFrames==sink.accepted.size&&sink.played.size==sink.accepted.size,"sink conservation and complete drain");
+            require(Arrays.equals(source.expected.notes(),sink.accepted.notes())&&Arrays.equals(source.expected.notes(),sink.played.notes()),"note identities and internal gaps unchanged");
+            require(s.droppedFrames==0&&s.expiredFrames==0&&s.flushedFrames==0&&s.pendingFrames==0,"only explicit quiet trim permitted");
+            require(source.expected.size-sink.accepted.size==s.trimmedFrames,"every removed actual frame counted once");
+            require(sink.maxHeld<=2880,"written-ahead ceiling");
+            if(!stall)require(source.expected.same(sink.accepted)&&source.expected.same(sink.played)&&s.trimmedFrames==0,"whole healthy waveform exact");
+        }
+        double phase(){return sink.firstTone-source.tone-skipped;}
+        String describe(){AudioPump.Summary s=pump.latency().summary();return "phaseMs="+phase()+" residence="+minResidence+"/"+maxResidence+" trim="+s.trimmedFrames+" firstTrimAt="+firstTrimAt+" omittedMs="+skipped+" guestMs="+source.guest+" emitted="+source.emitted+" underrunsBeforeEnd="+lateUnderruns;}
+    }
+    /** Own virtual sink. Head quantization is independent of actual FIFO consumption. */
+    static final class Sink implements AudioPump.Output {
+        final Rig r;final Samples accepted=new Samples(),played=new Samples();
+        long last,consumed,maxHeld,reportedHead,quietFrom;boolean running,started;int underruns;double firstTone=Double.NaN;
+        Sink(Rig r){this.r=r;}
+        long held(){return accepted.size-consumed;}
+        void advance(){
+            long demand=running?(r.now-last)*RATE:0;last=r.now;
+            long n=Math.min(demand,held());
+            for(int i=0;i<n;i++){short v=accepted.data[(int)consumed++];played.add(v);
+                if(v!=0){quietFrom=consumed;if(Double.isNaN(firstTone))firstTone=r.now-demand/(double)RATE+i/(double)RATE;}}
+            if(demand>n){underruns++;running=false;quietFrom=consumed;}
+        }
+        public boolean start(AudioPump.Focus f){last=r.now;return true;}
+        public int write(short[] pcm,int offset,int count){advance();int n=(int)Math.min(count,6000-held());
+            for(int i=0;i<n;i++)accepted.add(pcm[offset+i]);maxHeld=Math.max(maxHeld,held());
+            int need=started&&r.anyDataRestart?1:2880;
+            if(!running&&held()>=need){running=true;started=true;last=r.now;quietFrom=consumed;}return n;}
+        public long queuedFrames(){advance();
+            // Synthetic reporting delay, independent of physical playback: alternate exact
+            // reads with a 320-frame lag, retaining a monotone head across transitions.
+            long lag=r.syntheticDelay&&running&&r.now%37<18?320:0;
+            reportedHead=Math.max(reportedHead,Math.max(0,(consumed/r.head)*r.head-lag));
+            return accepted.size-reportedHead;}
+        public int startThresholdFrames(){return 2880;}
+        public int writableFrames(){return 6000;}
+        public int underrunCount(){return underruns;}
+        public void suspend(){throw new AssertionError("unexpected sink suspension");}
+        public void resume(){}
+        public void stop(){}
+    }
+    /** Restart may occur on a subthreshold prefix; head reporting may span more than 5 ms.
+     * Both tests use real completed advances and independent physical FIFO assertions. */
+    static void restartAndDelayedHead(boolean delayed)throws Exception {
+        for(boolean varied:new boolean[]{false,true}){
+            Rig healthy=new Rig(varied,1,2,false,false,true);
+            healthy.anyDataRestart=!delayed;healthy.syntheticDelay=delayed;healthy.run();
+            Rig r=new Rig(varied,1,2,true,false,true);
+            r.anyDataRestart=!delayed;r.syntheticDelay=delayed;r.firstRefillMs=5;
+            long previousTrim=0;
+            for(int at=1;at<=END+700;at++){
+                r.now=at;r.sink.advance();
+                boolean blocked=at>=2000&&at<2200||at>=4000&&at<4032;
+                if(at<=END&&!blocked&&(r.replayTurn>=0?at>=r.replayTurn:at>=r.nextOwner))r.owner();
+                r.runTasks();r.retries();AudioPump.Summary s=r.pump.latency().summary();
+                require(s.offeredFrames==s.pendingFrames+s.inflightFrames+s.writtenFrames+s.trimmedFrames
+                        +s.droppedFrames+s.expiredFrames+s.flushedFrames,"restart every-tick conservation");
+                if(s.trimmedFrames>previousTrim){
+                    require(r.sink.consumed-r.sink.quietFrom>=48000,"restart one second physically played quiet");
+                    previousTrim=s.trimmedFrames;
+                }
+                if(r.sink.started&&at<=END-100){
+                    long physicalLoss=at*(long)RATE-r.sink.consumed-64L*RATE;
+                    require(s.trimmedFrames<=physicalLoss+1,"restart physical overtrim <= one frame");
+                }
+                if(at>=4300&&at<=4650){long residence=s.pendingFrames+r.sink.held();
+                    r.minResidence=Math.min(r.minResidence,residence);r.maxResidence=Math.max(r.maxResidence,residence);}
+                if(at==END)r.lateUnderruns=r.sink.underruns;
+            }
+            AudioPump.Summary s=r.pump.latency().summary();
+            require(r.debt==0&&r.skipped==0,"restart retains every logical request");
+            require(s.offeredFrames==r.source.emitted&&s.offeredFrames==r.source.expected.size,"restart literal PCM only");
+            require(s.writtenFrames==r.sink.accepted.size&&r.sink.accepted.same(r.sink.played),"restart complete FIFO drain");
+            require(Arrays.equals(r.source.expected.notes(),r.sink.played.notes()),"restart three notes and unequal gaps exact");
+            require(s.droppedFrames==0&&s.expiredFrames==0&&s.flushedFrames==0&&s.pendingFrames==0&&s.inflightFrames==0,
+                    "restart only counted quiet retirement");
+            require(r.source.expected.size-r.sink.accepted.size==s.trimmedFrames,"restart removed PCM counted once");
+            require(r.sink.maxHeld<=2880&&r.lateUnderruns<=healthy.lateUnderruns+1,"restart ceiling and underrun margin");
+            long tolerance=delayed?321:2;double delta=(r.phase()-healthy.phase())*RATE;
+            require(delta>=-1&&delta<=tolerance,"restart recovery delayed="+delayed+" varied="+varied
+                    +" deltaFrames="+delta+" trimmed="+s.trimmedFrames);
+            require(s.trimmedFrames>0&&r.minResidence>=healthy.minResidence-1
+                    &&r.maxResidence<=healthy.maxResidence+tolerance,"restart recovers residence");
+        }
+    }
+    /** Small real underruns must not become the healthy reference, even across later stalls. */
+    static void shortStallsKeepInitialHealthyPhase()throws Exception {
+        for(boolean varied:new boolean[]{false,true})for(int head:new int[]{1,96,240}){
+            Rig healthy=new Rig(varied,head,1,false,false,false);healthy.run();
+            for(int duration:new int[]{50,52,54})for(boolean again:new boolean[]{false,true}){
+                Rig r=new Rig(varied,head,1,true,false,false);
+                long quietStartHead=-1,previousTrim=0;
+                for(int at=1;at<=END+700;at++){
+                    r.now=at;r.sink.advance();
+                    boolean blocked=at>=2000&&at<2000+duration
+                            ||again&&at>=3600&&at<3600+duration+4;
+                    boolean due=r.replayTurn>=0?at>=r.replayTurn:at>=r.nextOwner;
+                    if(at<=END&&!blocked&&due)r.owner();
+                    boolean wasRunning=r.sink.running;
+                    r.runTasks();r.retries();
+                    if(!wasRunning&&r.sink.running)quietStartHead=r.sink.consumed;
+                    AudioPump.Summary s=r.pump.latency().summary();
+                    if(s.trimmedFrames>previousTrim){
+                        require(quietStartHead>=0&&r.sink.consumed-quietStartHead>=48000,
+                                "short stall needs one full second actually played quiet");
+                        previousTrim=s.trimmedFrames;
+                    }
+                    if(r.sink.consumed>0&&at<=END-100){
+                        long excess=at*(long)RATE-r.sink.consumed-64L*RATE;
+                        require(s.trimmedFrames<=excess+1,"short stall trim exceeds physical playback loss");
+                    }
+                }
+                String label="varied="+varied+" head="+head+" stall="+duration+" again="+again;
+                AudioPump.Summary s=r.pump.latency().summary();
+                require(r.debt==0&&r.skipped==0,"short stall replays every logical request");
+                require(s.offeredFrames==r.source.emitted&&s.offeredFrames==s.writtenFrames+s.pendingFrames
+                        +s.inflightFrames+s.trimmedFrames+s.droppedFrames+s.expiredFrames+s.flushedFrames,
+                        "short stall literal PCM conservation");
+                require(s.droppedFrames==0&&s.expiredFrames==0&&s.flushedFrames==0&&s.pendingFrames==0,
+                        "short stall permits only explicit quiet trim");
+                require(r.source.expected.size-r.sink.accepted.size==s.trimmedFrames
+                        &&r.sink.accepted.same(r.sink.played),"short stall removed/played accounting");
+                require(Arrays.equals(r.source.expected.notes(),r.sink.played.notes()),"short stall notes and gaps exact");
+                require(r.sink.maxHeld<=2880,"short stall keeps written-ahead ceiling");
+                double delta=r.phase()-healthy.phase();
+                require(delta>=-1.0/RATE&&delta<=head/(double)RATE+1.0/RATE,
+                        "short stall healthy phase "+label+" deltaFrames="+Math.round(delta*RATE));
+                require(r.sink.underruns<=healthy.sink.underruns+(again?2:1),"short stall adds no extra underrun");
+            }
+        }
+        System.out.println("PASS short stalls retain initial healthy phase: 36 cases");
+    }
+    static void trimsRespectPhysicalPlayback()throws Exception {
+        for(String mode:new String[]{"repeat","empty","short"}){
+            Rig r=new Rig(!mode.equals("empty"),96,1,true,false,true);r.checkTrueTrim=true;
+            if(mode.equals("repeat")){r.repeat=true;r.source.tone=7000;}else r.source.loss=mode;
+            r.run();
+        }
+    }
+    /** Native drains that return fewer frames are literal omissions, never repaid logical time. */
+    static void missingPcm()throws Exception {
+        for(boolean varied:new boolean[]{false,true})for(int head:new int[]{1,96,240})for(int gap:new int[]{1,2,8}){
+            Rig healthy=new Rig(varied,head,gap,false,false,true);healthy.run();
+            for(String loss:new String[]{"empty","short"}){
+                Rig r=new Rig(varied,head,gap,true,false,true);r.source.loss=loss;r.run();
+                require(r.source.missing>0,"source actually omits PCM");double delta=r.phase()-healthy.phase();
+                require(delta>=-1.0/RATE&&delta<=head/(double)RATE+1.0/RATE,"missing PCM preserves healthy phase "+loss+" varied="+varied+" head="+head+" gap="+gap+" delta="+delta);
+                require(r.minResidence>=healthy.minResidence-1&&r.maxResidence<=healthy.maxResidence+head,"missing PCM preserves healthy margin");
+                require(r.lateUnderruns<=healthy.lateUnderruns+1,"missing PCM adds no late underrun");
+            }
+        }
+        System.out.println("PASS actual zero/short drains: 36 cases");
+    }
+    static void repeated()throws Exception {
+        for(boolean varied:new boolean[]{false,true})for(int head:new int[]{1,96,240})for(int gap:new int[]{1,2,8}){
+            Rig healthy=new Rig(varied,head,gap,false,false,true);healthy.repeat=true;healthy.source.tone=7000;healthy.run();
+            for(boolean omit:new boolean[]{false,true}){
+                Rig r=new Rig(varied,head,gap,true,omit,true);r.repeat=true;r.source.tone=7000;r.run();
+                require(r.skipped==(omit?224:0),"two real omission intervals (116ms then108ms)");double delta=r.phase()-healthy.phase();
+                require(delta>=-1.0/RATE&&delta<=head/(double)RATE+1.0/RATE,"repeated phase variation="+varied+" head="+head+" gap="+gap+" omission="+omit+" delta="+delta);
+                require(r.minResidence>=healthy.minResidence-1&&r.maxResidence<=healthy.maxResidence+head,"repeated healthy margin");
+                require(r.lateUnderruns<=healthy.lateUnderruns+2,"only deliberate repeated stalls underrun");
+            }
+        }
+        System.out.println("PASS repeated actual-caller replay/omission: 36 cases");
+    }
+    public static void main(String[] args)throws Exception {
+        String mode=args.length==0?"all":args[0];int failed=0,passed=0;
+        for(boolean varied:new boolean[]{false,true})for(int head:new int[]{1,96,240}){
+            Rig healthy=new Rig(varied,head,1,false,false,true);healthy.run();
+            System.out.println("PASS healthy variation="+varied+" head="+head+" "+healthy.describe());passed++;
+            for(int gap:new int[]{1,2,8})for(boolean omit:new boolean[]{false,true}){
+                if(mode.equals("controls")&&!omit||mode.equals("replay")&&omit)continue;
+                String label="variation="+varied+" head="+head+" gap="+gap+" omission="+omit;
+                try {
+                    Rig r=new Rig(varied,head,gap,true,omit,true);r.run();
+                    System.out.println("MEASURE "+label+" "+r.describe()+" healthyPhase="+healthy.phase());
+                    require(omit?r.skipped==116:r.skipped==0,"paired timing distinction retained");
+                    // One physical frame negative allowance, bounded quantized-head positive allowance.
+                    double delta=r.phase()-healthy.phase();
+                    require(delta>=-1.0/RATE&&delta<=head/(double)RATE+1.0/RATE,"healthy tone phase lost or residual lag ms="+delta);
+                    require(r.minResidence>=healthy.minResidence-1&&r.maxResidence<=healthy.maxResidence+head,"healthy residence envelope lost or excess retained");
+                    require(r.lateUnderruns<=healthy.lateUnderruns+1,"added late-tick underruns beyond deliberate stall");
+                    System.out.println("PASS "+label);passed++;
+                }catch(AssertionError e){System.out.println("FAIL "+label+": "+e.getMessage());failed++;}
+            }
+        }
+        System.out.println("RESULT mode="+mode+" passed="+passed+" failed="+failed);
+        if(failed>0)throw new AssertionError("actual pipeline failures="+failed);
+    }
+}
+
 }

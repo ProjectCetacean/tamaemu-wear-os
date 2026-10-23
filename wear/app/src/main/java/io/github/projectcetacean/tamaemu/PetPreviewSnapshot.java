@@ -32,6 +32,24 @@ public final class PetPreviewSnapshot {
         if(clockQuality!=0 || committedUtcMillis<MIN_UTC_MILLIS || committedUtcMillis>MAX_UTC_MILLIS) label+=" · Time needs checking";
         return label;
     }
+    /** Current clock proof overlays presentation only; saved provenance remains historical. */
+    String statusLabel(TimeVerifier.Outcome verification) {
+        String label=mode==Mode.NORMAL?"Normal":awayPaused?"Protected: paused away":"Protected";
+        if(debtMillis>0)label+=" · Catch-up needed";
+        return appendTime(label,verification);
+    }
+    String exceptionalStatus(TimeVerifier.Outcome verification) {
+        return appendTime(mode==Mode.NORMAL?null:awayPaused?"Protected: paused away":"Protected",verification);
+    }
+    private String appendTime(String label,TimeVerifier.Outcome verification) {
+        if(committedUtcMillis<MIN_UTC_MILLIS||committedUtcMillis>MAX_UTC_MILLIS)
+            label=append(label,"Time needs checking (saved time)");
+        String notice=TimeVerifier.notice(verification);
+        if(notice!=null)label=append(label,notice);
+        if(clockQuality!=0)label=append(label,"Earlier time estimated");
+        return label;
+    }
+    private static String append(String label,String text){return label==null?text:label+" · "+text;}
     /** Saved policy/clock notices only. Checkpoint debt is not current replay progress. */
     public String exceptionalStatus() {
         String label=mode==Mode.NORMAL ? null : awayPaused ? "Protected: paused away" : "Protected";

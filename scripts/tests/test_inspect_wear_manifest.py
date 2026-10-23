@@ -2,6 +2,10 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import struct
+import tempfile
+import zipfile
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('wear_apk', Path(__file__).parents[1] / 'inspect-wear-apk.py')
 module = importlib.util.module_from_spec(spec)
@@ -75,22 +79,116 @@ class ManifestContract(unittest.TestCase):
         except AttributeError:
             self.fail('Inspector version gate is not independently callable')
 
+    def source_version(self):
+        # Read the actual fixture source independently of the inspector parser.
+        source = Path(__file__).resolve().parents[2] / 'wear/app/build.gradle'
+        lines = source.read_text().splitlines()
+        code = next(line.split()[1] for line in lines if line.strip().startswith('versionCode '))
+        name = next(line.split("'")[1] for line in lines if line.strip().startswith('versionName '))
+        return code, name
+
     def test_current_release_version_is_accepted_for_production_and_qa(self):
+        code, name = self.source_version()
         for package in ['io.github.projectcetacean.tamaemu', module.QA_PACKAGE]:
             with self.subTest(package=package):
-                self.validate_version(f"package: name='{package}' versionCode='10' versionName='0.2.0-wear.10'\n", package)
+                self.validate_version(f"package: name='{package}' versionCode='{code}' versionName='{name}'\n", package)
 
     def test_stale_and_mixed_release_versions_are_rejected(self):
-        package='io.github.projectcetacean.tamaemu'
-        for code,name in [('9','0.2.0-wear.9'),('9','0.2.0-wear.10'),
-                          ('10','0.2.0-wear.9'),('100','0.2.0-wear.10'),('10','0.2.0-wear.100')]:
-            with self.subTest(code=code,name=name), self.assertRaisesRegex(AssertionError,'version'):
-                self.validate_version(f"package: name='{package}' versionCode='{code}' versionName='{name}'\n",package)
+        package = 'io.github.projectcetacean.tamaemu'
+        code, name = self.source_version()
+        stale = str(int(code) - 1)
+        for bad_code, bad_name in [(stale, 'old'), (stale, name), (code, 'old'),
+                                   (code + '0', name), (code, name + '0'), (code, name + '-debug')]:
+            with self.subTest(code=bad_code, name=bad_name), self.assertRaisesRegex(AssertionError, 'version'):
+                self.validate_version(f"package: name='{package}' versionCode='{bad_code}' versionName='{bad_name}'\n", package)
 
     def test_current_version_does_not_admit_the_wrong_package(self):
-        with self.assertRaisesRegex(AssertionError,'package'):
-            self.validate_version("package: name='io.github.projectcetacean.tamaemu.qoltest' versionCode='10' versionName='0.2.0-wear.10'\n",
+        code, name = self.source_version()
+        with self.assertRaisesRegex(AssertionError, 'package'):
+            self.validate_version(f"package: name='{module.QA_PACKAGE}' versionCode='{code}' versionName='{name}'\n",
                                   'io.github.projectcetacean.tamaemu')
+
+    def test_source_version_changes_the_accepted_binary(self):
+        package = 'io.github.projectcetacean.tamaemu'
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory) / 'build.gradle'
+            for code, name in [('12', '0.2.0-wear.12'), ('13', '0.2.0-wear.13')]:
+                build.write_text(f"android {{\n defaultConfig {{\n versionCode {code}\n versionName '{name}'\n }}\n}}\n")
+                module.validate_package_version(f"package: name='{package}' versionCode='{code}' versionName='{name}'", package, build)
+                for bad_code, bad_name in [('11', '0.2.0-wear.11'), (code + '0', name),
+                                           (code, name + '0'), (code, name + '-debug'), ('99', name), (code, 'old')]:
+                    with self.subTest(code=code, bad_code=bad_code, bad_name=bad_name), self.assertRaisesRegex(AssertionError, 'version'):
+                        module.validate_package_version(f"package: name='{package}' versionCode='{bad_code}' versionName='{bad_name}'", package, build)
+
+    def test_source_version_metadata_fails_closed(self):
+        package = 'io.github.projectcetacean.tamaemu'
+        valid = "versionCode 12\nversionName '0.2.0-wear.12'\n"
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory) / 'build.gradle'
+            badging = f"package: name='{package}' versionCode='12' versionName='0.2.0-wear.12'"
+            for invalid in ['', "versionCode 12\n", "versionName '0.2.0-wear.12'\n",
+                            valid + 'versionCode 12\n', valid + "versionName 'other'\n",
+                            valid.replace('versionCode 12', 'versionCode\n12'),
+                            valid.replace('12\n', '12 + 1\n'), valid.replace('12\n', 'currentVersion\n'),
+                            valid.replace("'0.2.0-wear.12'", 'computedName'), valid.replace('versionCode 12', 'versionCode 0'),
+                            valid.replace("'0.2.0-wear.12'", "''")]:
+                build.write_text('android {\n defaultConfig {\n' + invalid + '}\n}\n')
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(AssertionError, 'source.*version'):
+                    module.validate_package_version(badging, package, build)
+            build.unlink()
+            with self.assertRaisesRegex(AssertionError, 'source.*version'):
+                module.validate_package_version(badging, package, build)
+
+    def test_binary_version_metadata_cannot_be_borrowed_or_duplicated(self):
+        package = 'io.github.projectcetacean.tamaemu'
+        code, name = self.source_version()
+        valid = f"package: name='{package}' versionCode='{code}' versionName='{name}'"
+        for invalid in [valid + f" versionCode='{code}'", valid + f" versionName='{name}'",
+                        valid + '\n' + valid, valid.replace(f"versionCode='{code}'", '') + f"\nversionCode='{code}'",
+                        valid.replace(f"versionName='{name}'", "versionName='old'") + f"\nversionName='{name}'"]:
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(AssertionError, 'version'):
+                self.validate_version(invalid, package)
+
+    def check_jni_archive(self, missing_abi=None, missing_symbol='advanceHeadlessBatch'):
+        # Frozen legacy export fixture, independent of inspector-owned symbols.
+        old = ['open', 'close', 'width', 'height', 'advance', 'setButton', 'save',
+               'advanceHeadless', 'readLife', 'writeLife', 'committedPayloadHash', 'setAudioEnabled', 'drainAudio']
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / 'fixture.apk'
+            with zipfile.ZipFile(apk, 'w') as archive:
+                archive.writestr('classes.dex', b'PetTileService PetAgingJobService')
+                archive.writestr('AndroidManifest.xml', b'fixture')
+                for abi in ['armeabi-v7a', 'arm64-v8a', 'x86_64']:
+                    elf = bytearray(128)
+                    elf[:6] = b'\x7fELF\x02\x01'
+                    struct.pack_into('<Q', elf, 32, 64)
+                    struct.pack_into('<HH', elf, 54, 56, 1)
+                    struct.pack_into('<I', elf, 64, 1)
+                    struct.pack_into('<Q', elf, 112, 16384)
+                    symbols = [symbol for symbol in old + ['advanceHeadlessBatch']
+                               if not (abi == missing_abi and symbol == missing_symbol)]
+                    elf += b'\0'.join(('Java_io_github_projectcetacean_tamaemu_NativeBridge_' + symbol).encode() for symbol in symbols) + b'\0'
+                    archive.writestr(f'lib/{abi}/libtamaemu.so', elf)
+            # Stop after the real ABI/JNI/alignment loop, before external SDK work.
+            with patch.object(module.subprocess, 'check_output', side_effect=RuntimeError('JNI gate passed')):
+                module.inspect(apk, Path(directory), 'io.github.projectcetacean.tamaemu', True)
+
+    def test_each_abi_rejects_legacy_exports_without_batch(self):
+        for abi in ['armeabi-v7a', 'arm64-v8a', 'x86_64']:
+            with self.subTest(abi=abi):
+                try:
+                    with self.assertRaisesRegex(AssertionError, 'Missing JNI symbol: ' + abi):
+                        self.check_jni_archive(abi)
+                except RuntimeError:
+                    self.fail('Legacy-only library passed JNI gate: ' + abi)
+
+    def test_all_required_jni_exports_pass_in_all_abis(self):
+        with self.assertRaisesRegex(RuntimeError, 'JNI gate passed'):
+            self.check_jni_archive()
+
+    def test_legacy_jni_exports_remain_required(self):
+        with self.assertRaisesRegex(AssertionError, 'Missing JNI symbol: arm64-v8a'):
+            self.check_jni_archive('arm64-v8a', 'save')
 
     def test_required_tile_probe_rejects_valid_regular_qa(self):
         with self.assertRaisesRegex(AssertionError, 'required QA artifact kind'):
@@ -143,13 +241,13 @@ class ManifestContract(unittest.TestCase):
 
     def test_audioqa_dex_contract_complete_only_for_regular_qa(self):
         import io, zipfile
-        for suffixes in [[], ['Provider'], ['Receiver'], ['Driver'], ['Provider','Receiver','Driver']]:
+        for suffixes in [[], ['Provider'], ['Receiver'], ['Driver'], ['TrackProbe'], ['Provider','Receiver','Driver'], ['Provider','Receiver','Driver','TrackProbe'], ['Provider','Receiver','Driver','TrackProbe','PassiveScalars']]:
             data=io.BytesIO()
             with zipfile.ZipFile(data,'w') as z:
                 z.writestr('classes2.dex', b''.join(('Lio/github/projectcetacean/tamaemu/AudioQaInput'+s+';').encode() for s in suffixes))
             data.seek(0)
             with zipfile.ZipFile(data) as z:
-                if len(suffixes)==3:
+                if len(suffixes)==5:
                     module.validate_audioqa_classes(z,module.QA_PACKAGE,True)
                 else:
                     with self.assertRaisesRegex(AssertionError,'audioqa'):
@@ -160,6 +258,23 @@ class ManifestContract(unittest.TestCase):
                             module.validate_audioqa_classes(z,package,False)
                     else:
                         module.validate_audioqa_classes(z,package,False)
+
+    def test_regular_qa_rejects_missing_passive_scalars_class(self):
+        import io, zipfile
+        # Frozen pre-passive fixture: explicitly omit PassiveScalars, independent
+        # of the inspector's required-class constant.
+        descriptors = b''.join(('Lio/github/projectcetacean/tamaemu/AudioQaInput' + s + ';').encode()
+                               for s in ['Provider', 'Receiver', 'Driver', 'TrackProbe'])
+        self.assertNotIn(b'PassiveScalars', descriptors)
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            archive.writestr('classes.dex', descriptors)
+        data.seek(0)
+        with zipfile.ZipFile(data) as archive:
+            probe = module.validate_manifest(AUDIOQA, module.QA_PACKAGE)
+            self.assertFalse(probe)
+            with self.assertRaisesRegex(AssertionError, 'audioqa'):
+                module.validate_audioqa_classes(archive, module.QA_PACKAGE, True)
 
     def test_probe_requires_plain_application_and_debuggable(self):
         for invalid in [PROBE.replace('android.app.Application', '.TamaemuApplication'),
@@ -296,3 +411,7 @@ class ManifestContract(unittest.TestCase):
         invalid = MANIFEST.split('    E: service (line=9)')[0]
         with self.assertRaises(AssertionError):
             module.validate_manifest(invalid, 'io.github.projectcetacean.tamaemu')
+
+
+if __name__ == '__main__':
+    unittest.main()

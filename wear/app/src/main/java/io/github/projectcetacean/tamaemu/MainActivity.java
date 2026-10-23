@@ -51,7 +51,7 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         lifeSettings = new LifeSettingsPanel(lifeUi, new LifeSettingsPanel.Listener() {
             @Override public void mode(boolean protectedAway) { changeLifeMode(protectedAway); }
             @Override public void retry() { restart(true); }
-        });
+        }, ((TamaemuApplication)getApplication())::timeOutcome);
         layout = new WatchLayout(this);
         if (state != null) layout.settingsOpen = state.getBoolean("ui.settingsOpen", false);
         if (layout.settingsOpen) layout.createSettings();
@@ -63,11 +63,19 @@ public final class MainActivity extends Activity implements EmulatorSession.List
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("ui.settingsOpen", layout.settingsOpen); super.onSaveInstanceState(state);
     }
-    @Override protected void onResume() { super.onResume(); resumed = true; restart(false); }
+    @Override protected void onResume() {
+        super.onResume(); resumed=true;
+        ((TamaemuApplication)getApplication()).timeOpportunity(()->runOnUiThread(()->{if(resumed)refreshLifeUi();}));
+        restart(false);
+    }
     private void restart(boolean retry) {
         if (!resumed) return;
         state(EmulatorSession.State.LOADING);
         if (retry) session.retry(this); else session.resume(this);
+    }
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && layout != null) layout.releaseControls();
     }
     @Override protected void onPause() {
         resumed = false;
@@ -330,7 +338,8 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         private void toggleControls(boolean forced) {
             if (!running || settingsOpen || preferences.controls != UiPreferences.Controls.RETRACTABLE || (!forced && input.hasActiveInput())) return;
             releaseControls(); controlsVisible = !controlsVisible; updateTargets();
-            display.announceForAccessibility(getString(controlsVisible ? R.string.ui_hide_controls : R.string.ui_show_controls));
+            (shellTapTarget() ? displayTapTarget : display).announceForAccessibility(
+                    getString(controlsVisible ? R.string.ui_controls_shown : R.string.ui_controls_hidden));
         }
         private void openSettings() {
             if (settingsOpen) return;
@@ -460,7 +469,8 @@ public final class MainActivity extends Activity implements EmulatorSession.List
         private void lightHaptic() { if (preferences.haptics) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); }
         @Override public boolean performClick() { return super.performClick(); }
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (!isEnabled() || !resumed) return false;
+            // A visible disabled overlay still owns its rectangle; never pass it to LCD gestures.
+            if (!isEnabled() || !resumed) return true;
             int action = event.getActionMasked(); int index = event.getActionIndex();
             switch (action) {
                 case MotionEvent.ACTION_DOWN:

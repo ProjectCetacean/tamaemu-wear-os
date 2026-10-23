@@ -18,7 +18,7 @@ final class SettingsPanel extends ScrollView {
     /** Later life controls/status can append real controls here without touching guest views. */
     interface Extension { void append(LinearLayout content); }
     private final LinearLayout content;
-    private final TextView heading, overlayExplanation, positionFallback;
+    private final TextView heading, gestures, overlayExplanation, positionFallback;
     private final Button integer;
     private WatchGeometry geometry;
     private final List<Runnable> refreshers = new ArrayList<>();
@@ -41,7 +41,7 @@ final class SettingsPanel extends ScrollView {
         });
         choice(R.string.ui_control_mode, () -> prefs.controls == UiPreferences.Controls.VISIBLE ? R.string.ui_visible : R.string.ui_retractable,
                 () -> update(prefs.withControls(prefs.controls == UiPreferences.Controls.VISIBLE ? UiPreferences.Controls.RETRACTABLE : UiPreferences.Controls.VISIBLE), false));
-        content.addView(text(R.string.ui_gestures, 12));
+        gestures = text(R.string.ui_gestures, 12); content.addView(gestures);
         choice(R.string.ui_control_space, () -> prefs.controlSpace == UiPreferences.ControlSpace.RESERVED ? R.string.ui_own_space : R.string.ui_over_display,
                 () -> update(prefs.with("controlSpace", prefs.controlSpace == UiPreferences.ControlSpace.RESERVED ? "OVERLAY" : "RESERVED"), false));
         choice(R.string.ui_position, () -> placementLabel(prefs.placement), () -> {
@@ -103,6 +103,7 @@ final class SettingsPanel extends ScrollView {
     }
     private void refresh() {
         for (Runnable update : refreshers) update.run();
+        gestures.setText(prefs.controls == UiPreferences.Controls.RETRACTABLE ? R.string.ui_gestures : R.string.ui_hold_for_settings);
         overlayExplanation.setVisibility(prefs.controlSpace == UiPreferences.ControlSpace.OVERLAY ? View.VISIBLE : View.GONE);
         if (!prefs.integerPixels || geometry == null) integer.setText(getResources().getString(R.string.ui_integer, getResources().getString(onOff(prefs.integerPixels))));
         else if (geometry.integerFallback) integer.setText(R.string.ui_integer_fallback);

@@ -23,7 +23,24 @@ final class EmulatorSession {
         void finish(StopResult result) { this.result = result; completed.countDown(); }
     }
 
+    // A request ceiling, not a native quantum or a promise of completion.
+    static final int MAX_REPLAY_MILLIS = LifeLedger.MAX_REPLAY_MILLIS;
+    static int checkedReplayCompletion(int requested,int completed) {
+        if(requested<=0||requested>MAX_REPLAY_MILLIS||completed<=0||completed>requested)
+            throw new IllegalStateException("Invalid replay completion");
+        return completed;
+    }
+
     interface Backend {
+        /** Catching-only completed-work API. Default performs one existing literal slice.
+         * Success reports only completed guest ms, in 1..requested. A throw means
+         * unknown guest state: no prefix is acknowledged and recovery must precede save.
+         * Overrides must yield after a small wall window, except an in-flight slice.
+         */
+        default int replay(long handle,int requested) throws Exception {
+            if(requested<=0||requested>MAX_REPLAY_MILLIS)throw new IllegalArgumentException("Invalid replay request");
+            int completed=Math.min(100,requested);headless(handle,completed);return completed;
+        }
         default void headless(long handle, int elapsed) throws Exception { advance(handle, elapsed, new int[width(handle)*height(handle)]); }
         default long[] readLife(long handle) { return new long[8]; }
         default void writeLife(long handle, long[] candidate) {}
@@ -35,6 +52,9 @@ final class EmulatorSession {
         int width(long handle);
         int height(long handle);
         void advance(long handle, int elapsed, int[] pixels) throws Exception;
+        default void advanceWithDebt(long handle,int elapsed,int[] pixels,long debtMs) throws Exception {
+            advance(handle,elapsed,pixels);
+        }
         void button(long handle, int button, boolean down);
         boolean save(long handle) throws Exception;
     }

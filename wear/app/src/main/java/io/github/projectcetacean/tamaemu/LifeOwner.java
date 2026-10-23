@@ -108,6 +108,7 @@ final class LifeOwner {
     // Attachment/recovery, jobs and mode changes need a durable settlement. Routine
     // foreground backlog (including save latency) only needs to catch up before input.
     private boolean checkpointAfterCatchup;
+    private boolean inputContinuity;
     private boolean schedulerFailed,accountingBlocked;
     private String scheduler="Not scheduled";
     private LifeStatus.OwnerState state=LifeStatus.OwnerState.CLOSED;
@@ -221,6 +222,7 @@ final class LifeOwner {
             if(recoveryRequired||nativeBroken){recovery();finishJob();return;}
             if(candidate!=null&&!persist()){finishJob();return;}
             if(!open(boundary)){finishJob();return;}
+            if(!releaseButtons("BACKGROUND")){finishJob();return;}
             try{drainPresence();account(boundary,knownForeground);catching=true;checkpointAfterCatchup=true;setState(LifeStatus.OwnerState.CATCHING_UP);ensurePump(0);}
             catch(RuntimeException error){accountingError();finishJob();}
         });
@@ -296,7 +298,7 @@ final class LifeOwner {
             if(job!=null&&(job.isCancelled()||foregroundWanted||worker.nowMillis()>=jobDeadline)) {
                 if(!persist()){finishJob();return;}
                 finishJob();
-                if(!foregroundWanted&&!foreground){closeNative();return;}
+                if(!foregroundWanted&&!foreground){closeSavedBackground();return;}
             }
             // Pause invalidates work before its queued boundary handler gets the worker.
             if(foreground&&!foregroundWanted)return;
@@ -305,17 +307,24 @@ final class LifeOwner {
             // oldest captured input boundary until its preceding debt is consumed.
             ButtonBoundary input=nextMode==null?accountPumpBoundary():null;
             if(ledger.debtMs>0) {
-                int quantum=(int)Math.min(100,ledger.debtMs);
+                boolean replay=catching||!foreground;
+                // Snapshot owed work before the call. Never cross a deferred input release.
+                int quantum=(int)Math.min(replay?EmulatorSession.MAX_REPLAY_MILLIS:100,ledger.debtMs);
                 for(long release:releaseAtProgress)if(release>progressed)quantum=(int)Math.min(quantum,release-progressed);
-                long afterProgress=Math.addExact(progressed,quantum);
-                if(catching||!foreground)backend.headless(handle,quantum);
-                else backend.advance(handle,quantum,pixels);
-                ledger=LifeLedger.consume(ledger,quantum);progressed=afterProgress;
+                long afterProgress=Math.addExact(progressed,quantum); // Check before any guest mutation.
+                if(replay) {
+                    int completed=EmulatorSession.checkedReplayCompletion(quantum,backend.replay(handle,quantum));
+                    ledger=LifeLedger.consumeReplay(ledger,completed,quantum);
+                    progressed=Math.addExact(progressed,completed);
+                } else {
+                    backend.advanceWithDebt(handle,quantum,pixels,ledger.debtMs);
+                    ledger=LifeLedger.consume(ledger,quantum);progressed=afterProgress;
+                }
                 releaseDueButtons();
                 if(catching)publishReplayProgress();else publishStatus();
                 if(!catching&&foreground&&foregroundWanted)publishFrame();
                 if(worker.nowMillis()-lastCheckpoint>=EmulatorSession.CHECKPOINT_MILLIS&&!persist()) { rejectMode();finishJob();return; }
-                // One native call per queued turn: lifecycle/cancel/input always gets a boundary.
+                // One bounded replay call per turn: queued lifecycle/cancel/input retains a boundary.
                 if(ledger.debtMs>0){ensurePump(0);return;}
             }
             if(!catching&&worker.nowMillis()-lastCheckpoint>=EmulatorSession.CHECKPOINT_MILLIS&&!persist())return;
@@ -326,7 +335,7 @@ final class LifeOwner {
                 checkpointAfterCatchup=false;
                 catching=false;
                 if(nextMode!=null){ModeCallback cb=modeCallback;nextMode=null;modeCallback=null;modeResult(cb,true);}
-                if(job!=null){finishJob();if(!foregroundWanted&&!foreground){closeNative();return;}}
+                if(job!=null){finishJob();if(!foregroundWanted&&!foreground){closeSavedBackground();return;}}
                 if(!foregroundWanted||!foreground)return;
                 if(!markRunning())return;
                 setState(LifeStatus.OwnerState.PLAYING);legacyState(EmulatorSession.State.RUNNING);
@@ -346,8 +355,10 @@ final class LifeOwner {
         if(nativeBroken||accountingBlocked||handle==0)return false;
         LifeStatus.OwnerState before=state;
         try {
+            // Only ordinary foreground checkpoints may retain live contact ownership.
+            // Enqueued edges wait outside the frozen candidate until this save settles.
+            inputContinuity=before==LifeStatus.OwnerState.PLAYING&&candidate==null&&foreground&&foregroundWanted;
             if(candidate==null) {
-                if(!releaseButtons("CHECKPOINT"))return false;
                 candidate=committed==null?ledger:LifeLedger.nextGeneration(ledger);
                 // Prepare the exact zero-time frame immediately before the write/save pair.
                 try{backend.advance(handle,0,pixels);}catch(Exception|LinkageError partial){candidate=null;nativeFailure();return false;}
@@ -356,7 +367,7 @@ final class LifeOwner {
                 catch(RuntimeException|LinkageError invalidNative){candidate=null;candidateFrame=null;nativeFailure();return false;}
             }
             setState(LifeStatus.OwnerState.SAVING);
-            if(!backend.save(handle)){setState(LifeStatus.OwnerState.SAVE_FAILED);legacyState(EmulatorSession.State.SAVE_FAILED);return false;}
+            if(!backend.save(handle)){inputContinuity=false;setState(LifeStatus.OwnerState.SAVE_FAILED);legacyState(EmulatorSession.State.SAVE_FAILED);return false;}
             committed=candidate;ledger=candidate;candidate=null;
             lastCheckpoint=worker.nowMillis();savedUtc=clock.sample().wallMs;
             try {
@@ -364,11 +375,11 @@ final class LifeOwner {
                 CommitSnapshot snapshot=new CommitSnapshot(committed,hash,candidateFrame,savedUtc);
                 observer.committed(snapshot);
             }catch(Exception|LinkageError cacheFailure){scheduler="Preview publication failed";}
-            candidateFrame=null;setState(before==LifeStatus.OwnerState.SAVE_FAILED?LifeStatus.OwnerState.CATCHING_UP:before);return true;
+            candidateFrame=null;inputContinuity=false;setState(before==LifeStatus.OwnerState.SAVE_FAILED?LifeStatus.OwnerState.CATCHING_UP:before);return true;
         }catch(ArithmeticException overflow){accountingError();return false;}
         catch(Exception|LinkageError failure){
-            setState(LifeStatus.OwnerState.SAVE_FAILED);legacyState(EmulatorSession.State.SAVE_FAILED);return false;
-        }
+            inputContinuity=false;setState(LifeStatus.OwnerState.SAVE_FAILED);legacyState(EmulatorSession.State.SAVE_FAILED);return false;
+        } finally { inputContinuity=false; }
     }
     void button(int button,boolean down) {
         if(button<0||button>=3)throw new IllegalArgumentException("Invalid button");
@@ -476,6 +487,11 @@ final class LifeOwner {
         if(marker.exists()&&!marker.delete()){setState(LifeStatus.OwnerState.SAVE_FAILED);return false;}
         markerOwned=false;return true;
     }
+    private synchronized void closeSavedBackground() {
+        // A visit captured during save still belongs to its queued lifecycle settlement.
+        if(foregroundWanted||foreground||!presenceBoundaries.isEmpty()||candidate!=null||ledger!=committed||nativeBroken||accountingBlocked)return;
+        if(clearMarker())closeNative();
+    }
     private void closeNative() {
         if(handle!=0){try{backend.close(handle);}catch(RuntimeException|LinkageError ignored){}}
         handle=0;pixels=null;foreground=false;catching=false;
@@ -501,10 +517,10 @@ final class LifeOwner {
     }
     private void rejectMode(){if(modeCallback!=null){ModeCallback cb=modeCallback;modeCallback=null;nextMode=null;modeResult(cb,false);}}
     private void modeResult(ModeCallback cb,boolean accepted){LifeStatus snapshot=status();main.execute(()->cb.complete(accepted,snapshot));}
-    private LifeStatus status(){return new LifeStatus(ledger,committed,state,savedUtc,scheduler,schedulerFailed);}
+    private LifeStatus status(){return new LifeStatus(ledger,committed,state,savedUtc,scheduler,schedulerFailed,inputContinuity);}
     private synchronized void setState(LifeStatus.OwnerState next){
         state=next;
-        if(next==LifeStatus.OwnerState.PLAYING)inputAdmission=true;
+        if(next==LifeStatus.OwnerState.PLAYING||(next==LifeStatus.OwnerState.SAVING&&inputContinuity))inputAdmission=true;
         else clearPendingInput("STATE_"+next);
         publishStatus();
     }

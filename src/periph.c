@@ -722,9 +722,8 @@ int periph_speed_step(int cur, int dir)
     return cur;
 }
 
-static void rtc_tick(Emu *e, uint32_t cycles)
+static void rtc_tick(Emu *e, uint32_t cycles, double hz)
 {
-    double hz = e->cmu.mclk_hz > 0 ? e->cmu.mclk_hz : e->dev.osc3_hz;
     double secs = (double)cycles / hz;
     double was = e->emu_secs;
     e->emu_secs += secs;
@@ -879,9 +878,9 @@ static void irg_tick(Emu *e)
     }
 }
 
-void periph_tick(Emu *e, uint32_t cycles)
+void periph_tick_at(Emu *e, uint32_t cycles, double hz)
 {
-    rtc_tick(e, cycles);
+    rtc_tick(e, cycles, hz);
     if (e->ir_log) link_ir_pc_sample(e);
     if (e->ir_tx_ready_at && e->cycles >= e->ir_tx_ready_at) {
         e->ir_tx_ready_at = 0;
@@ -916,4 +915,9 @@ void periph_tick(Emu *e, uint32_t cycles)
         if (clocks) t16_run(e, x, clocks > 65536 ? 65536 : clocks);
     }
     itc_scan(e);
+}
+
+void periph_tick(Emu *e, uint32_t cycles)
+{
+    periph_tick_at(e, cycles, e->cmu.mclk_hz > 0 ? e->cmu.mclk_hz : e->dev.osc3_hz);
 }

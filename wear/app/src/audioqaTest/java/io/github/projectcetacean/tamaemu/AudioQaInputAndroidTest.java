@@ -72,6 +72,114 @@ public class AudioQaInputAndroidTest {
     void send(String action) throws Exception {receive(app,action,true);}
     void idle(long ms){Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms));}
     @After public void cleanup() throws Exception {if(provider!=null){provider.onActivityPaused(activity);app.unregisterActivityLifecycleCallbacks(provider);} }
+    List<Runnable> probeTasks;
+    AudioQaInputTrackProbe installProbe() throws Exception {
+        Field consumed=AudioQaInputTrackProbe.class.getDeclaredField("consumed");consumed.setAccessible(true);consumed.set(null,false);
+        // The shared contact fixture creates foreground audio when it enters RUNNING.
+        // This probe fixture represents an initial firmware-free setup process instead.
+        set(app,"foregroundAudio",null);
+        probeTasks=new ArrayList<>();
+        AudioQaInputTrackProbeAndroidTest.Time clock=new AudioQaInputTrackProbeAndroidTest.Time();
+        AudioQaInputTrackProbe probe=new AudioQaInputTrackProbe(probeTasks::add,a->new AudioQaInputTrackProbeAndroidTest.Sink(clock),clock);
+        set(field(provider,"driver"),"probe",probe);return probe;
+    }
+    static int attachListenerCount(View view) throws Exception {
+        Field listenerInfo=View.class.getDeclaredField("mListenerInfo");listenerInfo.setAccessible(true);
+        Object info=listenerInfo.get(view);
+        if(info==null)return 0;
+        Object listeners=field(info,"mOnAttachStateChangeListeners");
+        return listeners==null?0:((List<?>)listeners).size();
+    }
+    private void startFailureCleansUpAndAdmitsLaterContacts(boolean fatal,boolean beforePort) throws Exception {
+        installProbe(); // reset process allowance and represent the original neutral/no-pump stimulus
+        AudioQaInputTrackProbeAndroidTest.Time clock=new AudioQaInputTrackProbeAndroidTest.Time();
+        int[] closes={0};boolean[] focusReleased={false};
+        Error startError=new OutOfMemoryError("synthetic: native/Java allocation during track creation");
+        RuntimeException control=new IllegalStateException("control");
+        AudioQaInputTrackProbe.Port port=new AudioQaInputTrackProbe.Port(){
+            public boolean start(AudioPump.Focus f){if(fatal)throw startError;throw control;}
+            public long head(){return 0;}public int[] grant(){return new int[10];}public int write(short[] z,int n){return 0;}
+            public void close(){closes[0]++;focusReleased[0]=true;}
+        };
+        AudioQaInputTrackProbe probe=new AudioQaInputTrackProbe(probeTasks::add,a->{if(beforePort)throw startError;return port;},clock);
+        set(field(provider,"driver"),"probe",probe);
+        activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        View decor=activity.getWindow().getDecorView();int baseline=attachListenerCount(decor);
+        send("track-contract");assertEquals(1,probeTasks.size());assertTrue(probe.busy());
+        assertEquals(baseline+1,attachListenerCount(decor));assertNull(field(app,"foregroundAudio"));
+        Throwable escaped=null;try{probeTasks.remove(0).run();}catch(Throwable failure){escaped=failure;}
+        // Same Odo timing: advance beyond budget and let all scheduled main callbacks execute.
+        clock.t+=4000000000L;idle(5000);
+        assertEquals(beforePort?0:1,closes[0]);assertEquals(!beforePort,focusReleased[0]);
+        assertFalse("worker failure must disarm",probe.busy());
+        assertEquals("attach listener removed on UI main",baseline,attachListenerCount(decor));
+        assertNull(field(probe,"observer"));assertNull(field(probe,"decor"));
+        assertNull(((WeakReference<?>)field(probe,"owner")).get());
+        List<ShadowLog.LogItem> logs=ShadowLog.getLogsForTag(AudioQaInputTrackProbe.TAG);
+        assertTrue("incomplete end receipt",logs.stream().anyMatch(l->l.msg.startsWith("phase=end")&&l.msg.contains("incomplete=1")&&!l.msg.contains("reason=complete")));
+        assertTrue("disarm receipt",logs.stream().anyMatch(l->l.msg.startsWith("phase=disarmed")&&l.msg.contains("active=0 listenersRemoved=1")));
+        if(fatal){
+            assertSame("fatal error remains fatal",startError,escaped);
+            assertTrue("no invented release certainty",logs.stream().anyMatch(l->l.msg.startsWith("phase=end")&&l.msg.contains("released=0")&&l.msg.contains("incomplete=1")));
+        }else assertNull(escaped);
+        assertNull("no pump allocated in neutral probe",field(app,"foregroundAudio"));
+        send("track-contract");assertTrue("one-shot remains consumed",probeTasks.isEmpty());
+        assertFalse("fresh controller cannot repeat",new AudioQaInputTrackProbe().begin(activity));
+        activity.state(EmulatorSession.State.RUNNING);send("singles");idle(2000);
+        assertEquals("later contact block admitted",8,actions.size());
+        send("singles");idle(2000);assertEquals("contact once quota retained",8,actions.size());
+    }
+    @Test public void outOfMemoryAtStartDisarmsWithIncompleteReceiptAndLaterContacts() throws Exception {
+        startFailureCleansUpAndAdmitsLaterContacts(true,false);
+    }
+    @Test public void runtimeStartFailureControlDisarmsWithIncompleteReceiptAndLaterContacts() throws Exception {
+        startFailureCleansUpAndAdmitsLaterContacts(false,false);
+    }
+    @Test public void allocationFailureBeforePortAlsoDisarmsWithoutInventingRelease() throws Exception {
+        startFailureCleansUpAndAdmitsLaterContacts(true,true);
+    }
+    @Test public void trackProbeRejectsCareBusyWrongGatesAndNeverLaunches() throws Exception {
+        AudioQaInputTrackProbe probe=installProbe();
+        send("track-contract");assertTrue("care state refused",probeTasks.isEmpty());
+        send("singles");activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        send("track-contract");assertTrue("busy contacts refused",probeTasks.isEmpty());send("stop");
+        receive(app,"track-contract",false);
+        for(String pkg:new String[]{"io.github.projectcetacean.tamaemu",QA+".extra",QA}){
+            Context wrong=new ContextWrapper(app){@Override public String getPackageName(){return pkg;}@Override public ApplicationInfo getApplicationInfo(){ApplicationInfo i=new ApplicationInfo(super.getApplicationInfo());i.flags=pkg.equals(QA)?0:ApplicationInfo.FLAG_DEBUGGABLE;return i;}};
+            receive(wrong,"track-contract",true);
+        }
+        Intent intent=new Intent("track-contract").setComponent(new ComponentName(QA,AudioQaInputReceiver.class.getName()));
+        intent.putExtra("duration",5000);new AudioQaInputReceiver().onReceive(app,intent);
+        intent.removeExtra("duration");intent.setPackage("wrong");new AudioQaInputReceiver().onReceive(app,intent);
+        intent.setPackage(null).setComponent(new ComponentName(QA,"wrong"));new AudioQaInputReceiver().onReceive(app,intent);
+        assertTrue(probeTasks.isEmpty());assertFalse(probe.busy());
+        assertNull(Shadows.shadowOf(app).getNextStartedActivity());
+    }
+    @Test public void probeOnceAndMutualExclusionSurviveCancelAndOwnerReplacement() throws Exception {
+        AudioQaInputTrackProbe probe=installProbe();activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        send("track-contract");assertEquals(1,probeTasks.size());assertTrue(probe.busy());
+        activity.state(EmulatorSession.State.RUNNING);send("same-c");assertTrue(actions.isEmpty());
+        send("track-contract");send("stop");probeTasks.remove(0).run();idle(1);assertFalse(probe.busy());
+        activity.state(EmulatorSession.State.MISSING_FIRMWARE);send("track-contract");assertTrue(probeTasks.isEmpty());
+        assertFalse("another controller cannot reset process allowance",new AudioQaInputTrackProbe().begin(activity));
+    }
+    @Test public void lifecycleAndWindowFocusCancelBeforeWorkerAllocation() throws Exception {
+        AudioQaInputTrackProbe probe=installProbe();activity.state(EmulatorSession.State.MISSING_FIRMWARE);send("track-contract");
+        provider.onActivityPaused(activity);probeTasks.remove(0).run();idle(1);assertFalse(probe.busy());
+        assertTrue(ShadowLog.getLogsForTag(AudioQaInputTrackProbe.TAG).stream().anyMatch(l->l.msg.contains("reason=cancelled")&&l.msg.contains("released=1")));
+        probe=installProbe();provider.onActivityResumed(activity);send("track-contract");owner.windowFocusChanged(false);
+        probeTasks.remove(0).run();idle(1);assertFalse(probe.busy());
+    }
+    @Test public void previouslyAllocatedPumpEvenIfDisabledRefusesProbe() throws Exception {
+        installProbe();activity.state(EmulatorSession.State.MISSING_FIRMWARE);
+        set(app,"foregroundAudio",new ForegroundAudio(app));send("track-contract");assertTrue(probeTasks.isEmpty());
+    }
+    @Test public void unsupportedExtrasCannotStartInput() throws Exception {
+        Intent intent=new Intent("singles").setComponent(new ComponentName(QA,AudioQaInputReceiver.class.getName()));
+        intent.putExtra("repeat",2);
+        new AudioQaInputReceiver().onReceive(app,intent);idle(1000);
+        assertTrue("unsupported extras must fail closed",actions.isEmpty());
+    }
     @Test public void threeDistinctBlocksDeliverExactly16RealContactsAndNeverRepeat() throws Exception {
         send("singles");send("same-c");idle(2000);assertEquals(8,actions.size());
         send("singles");idle(1000);assertEquals("repeat must fail before process cap is reached",8,actions.size());
@@ -153,5 +261,112 @@ public class AudioQaInputAndroidTest {
         Object driver=field(provider,"driver"); Object ref=field(driver,"resumed");assertTrue(ref instanceof WeakReference);assertSame(activity,((WeakReference<?>)ref).get());
         provider.onActivityStopped(activity);assertNull(((WeakReference<?>)field(driver,"resumed")).get());
         provider.onActivityResumed(activity);provider.onActivityDestroyed(activity);assertNull(((WeakReference<?>)field(driver,"resumed")).get());
+    }
+
+    // Only these tests reset the process allowance, representing a fresh Robolectric sandbox.
+    AudioQaInputPassiveScalars passiveFixture() throws Exception {
+        Field used=AudioQaInputPassiveScalars.class.getDeclaredField("consumed");used.setAccessible(true);used.set(null,false);
+        return ((AudioQaInputDriver)field(provider,"driver")).passive;
+    }
+    long passiveCleanupCount() {
+        return ShadowLog.getLogsForTag(AudioQaInputPassiveScalars.TAG).stream().filter(l->l.msg.startsWith("phase=cleanup")).count();
+    }
+    @Test public void passiveBeforeLaunchHasFiniteDeadlineAndNoContactsOrComponentBegin() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();
+        AudioQaInputTrackProbe probe=installProbe();
+        provider.onActivityPaused(activity);
+        long cleanups=passiveCleanupCount();
+        send("passive-scalars");assertTrue(passive.busy());
+        assertNotNull("prelaunch registration",passive.bind());
+        provider.onActivityPaused(new Activity());assertTrue("unrelated departure cannot cancel",passive.busy());
+        idle(31000);assertTrue(passive.busy());idle(1000);assertFalse(passive.busy());
+        assertEquals(cleanups+1,passiveCleanupCount());
+        send("passive-stop");send("passive-scalars");idle(4000);
+        assertEquals(cleanups+1,passiveCleanupCount());assertFalse(passive.busy());
+        assertFalse("new controller cannot restart process allowance",new AudioQaInputPassiveScalars().begin());
+        assertTrue("zero contacts",actions.isEmpty());assertEquals(0,((Number)field(field(provider,"driver"),"totalContacts")).intValue());
+        assertTrue("zero component begin tasks",probeTasks.isEmpty());assertFalse(probe.busy());
+        assertNull(Shadows.shadowOf(app).getNextStartedActivity());
+        AudioPump.PassiveObserver replacement=new AudioPump.PassiveObserver(){};
+        assertTrue("observer removed at deadline",AudioPump.registerPassiveObserver(replacement));AudioPump.removePassiveObserver(replacement);
+    }
+    @Test public void passiveDepartureAfterResumeAndExplicitStopCleanExactlyOnce() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();AudioQaInputTrackProbe probe=installProbe();
+        long cleanups=passiveCleanupCount();send("passive-scalars");
+        provider.onActivityPaused(new Activity());assertTrue(passive.busy());
+        provider.onActivityPaused(activity);assertFalse(passive.busy());
+        provider.onActivityStopped(activity);send("passive-stop");idle(40000);
+        assertEquals(cleanups+1,passiveCleanupCount());assertTrue(actions.isEmpty());assertTrue(probeTasks.isEmpty());assertFalse(probe.busy());
+    }
+    @Test public void passiveExplicitStopRemovesTickAndDeadlineIncludesDeepSleep() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();long cleanups=passiveCleanupCount();
+        send("passive-scalars");AudioPump.PassiveObserver sink=passive.bind();
+        sink.acceptedOffer(1,137);send("passive-stop");sink.acceptedOffer(2,999);
+        int logs=ShadowLog.getLogsForTag(AudioQaInputPassiveScalars.TAG).size();idle(40000);
+        assertEquals(logs,ShadowLog.getLogsForTag(AudioQaInputPassiveScalars.TAG).size());
+        assertEquals(cleanups+1,passiveCleanupCount());assertFalse(passive.busy());
+        passive=passiveFixture();send("passive-scalars");sink=passive.bind();
+        ShadowSystemClock.simulateDeepSleep(Duration.ofSeconds(33));sink.acceptedOffer(7,222);idle(2000);
+        assertFalse(passive.busy());assertEquals(cleanups+2,passiveCleanupCount());
+        assertFalse(ShadowLog.getLogsForTag(AudioQaInputPassiveScalars.TAG).stream().anyMatch(l->l.msg.contains("firstOfferDebtMs=222")));
+    }
+    @Test public void passiveReceiverRetainsExplicitDebugAndPayloadValidation() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();
+        receive(app,"passive-scalars",false);
+        for(String pkg:new String[]{"io.github.projectcetacean.tamaemu",QA+".extra",QA}) {
+            Context wrong=new ContextWrapper(app){@Override public String getPackageName(){return pkg;}@Override public ApplicationInfo getApplicationInfo(){ApplicationInfo i=new ApplicationInfo(super.getApplicationInfo());i.flags=pkg.equals(QA)?0:ApplicationInfo.FLAG_DEBUGGABLE;return i;}};
+            receive(wrong,"passive-scalars",true);
+        }
+        Intent intent=new Intent("passive-scalars").setComponent(new ComponentName(QA,AudioQaInputReceiver.class.getName()));
+        intent.putExtra("duration",1000);new AudioQaInputReceiver().onReceive(app,intent);
+        assertFalse(passive.busy());assertTrue(actions.isEmpty());
+        send("passive-scalars");assertTrue(passive.busy());send("passive-stop");
+    }
+    @Test public void passiveLatchesAreThreadSafeTokenSpecificAndCountsUsePresence() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();send("passive-scalars");
+        AudioQaInputPassiveScalars.PumpScalars sink=(AudioQaInputPassiveScalars.PumpScalars)passive.bind();
+        sink.epoch(3,AudioPump.PassiveObserver.CONFIGURE_ON);sink.acceptedOffer(3,137);sink.stablePhase(3,1920);
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure=new java.util.concurrent.atomic.AtomicReference<>();
+        Thread[] writers=new Thread[4];
+        for(int n=0;n<writers.length;n++){writers[n]=new Thread(()->{try{
+            for(int j=0;j<100;j++){sink.acceptedOffer(3,999);sink.stablePhase(3,999);sink.headLag(3,321);}
+        }catch(Throwable t){failure.set(t);}});writers[n].start();}
+        for(Thread writer:writers)writer.join();assertNull(failure.get());
+        sink.epoch(4,AudioPump.PassiveObserver.FOCUS_GAIN);sink.acceptedOffer(4,17);
+        sink.acceptedOffer(3,555); // An old executor event must never become the new epoch's first value.
+        sink.references(3,AudioPump.PassiveObserver.DELAYED_HEAD,3,3);
+        sink.references(3,AudioPump.PassiveObserver.RAW_HEAD_INVALID,5,0);
+        sink.references(3,AudioPump.PassiveObserver.UNKNOWN_HEAD,0,0);
+        List<AudioQaInputPassiveScalars.Row> rows=sink.snapshot();assertEquals(2,rows.size());
+        AudioQaInputPassiveScalars.Row first=rows.get(0),next=rows.get(1);
+        assertEquals(137,first.debt);assertEquals(1920,first.pending);assertEquals(400,first.lagCount);assertEquals(321,first.maxLag);
+        assertEquals(1,first.retained);assertEquals(1,first.cleared);assertEquals(3,first.retainedMask);assertEquals(5,first.clearedMask);
+        assertEquals(17,next.debt);assertEquals(-1,next.pending);send("passive-stop");
+    }
+    @Test public void passiveSummaryDeltasNeverCrossTokenCounterResetOrPump() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();send("passive-scalars");
+        AudioQaInputPassiveScalars.PumpScalars sink=(AudioQaInputPassiveScalars.PumpScalars)passive.bind();
+        AudioPump.Latency latency=new AudioPump.Latency();latency.offered(20);latency.trimmed(3);latency.dropped(2);latency.underrun();
+        sink.summary(1,latency.summary(),7);AudioQaInputPassiveScalars.Row row=sink.snapshot().get(0);
+        assertEquals(-1,row.trimDelta);assertEquals(-1,row.platformDelta);
+        latency.trimmed(4);latency.dropped(5);latency.underrun();sink.summary(1,latency.summary(),9);row=sink.snapshot().get(0);
+        assertEquals(4,row.trimDelta);assertEquals(5,row.dropDelta);assertEquals(1,row.underrunDelta);assertEquals(2,row.platformDelta);
+        sink.summary(1,latency.summary(),0);assertEquals(-1,sink.snapshot().get(0).platformDelta);
+        sink.summary(2,latency.summary(),1);assertEquals(-1,sink.snapshot().get(0).trimDelta);
+        sink.summary(2,new AudioPump.Latency().summary(),-1);row=sink.snapshot().get(0);assertEquals(-1,row.trimDelta);assertEquals(-1,row.platformDelta);
+        AudioQaInputPassiveScalars.PumpScalars second=(AudioQaInputPassiveScalars.PumpScalars)passive.bind();
+        second.summary(2,latency.summary(),8);assertEquals(-1,second.snapshot().get(0).trimDelta);
+        send("passive-stop");
+    }
+
+    @Test public void passiveCapacityIsBoundedWithoutInventingFirstValues() throws Exception {
+        AudioQaInputPassiveScalars passive=passiveFixture();send("passive-scalars");
+        AudioQaInputPassiveScalars.PumpScalars sink=(AudioQaInputPassiveScalars.PumpScalars)passive.bind();
+        assertNotNull(passive.bind());assertNotNull(passive.bind());assertNotNull(passive.bind());assertNull(passive.bind());
+        for(int i=0;i<65;i++)sink.epoch(i,AudioPump.PassiveObserver.INVALIDATE);
+        List<AudioQaInputPassiveScalars.Row> rows=sink.snapshot();assertEquals(64,rows.size());
+        assertEquals(1,rows.get(63).overflow);assertFalse(rows.get(0).offered);assertEquals(-1,rows.get(0).debt);
+        sink.acceptedOffer(0,-1);sink.acceptedOffer(0,111);assertEquals(-1,sink.snapshot().get(0).debt);
+        send("passive-stop");
     }
 }

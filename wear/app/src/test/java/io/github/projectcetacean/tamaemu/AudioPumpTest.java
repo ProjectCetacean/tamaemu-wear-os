@@ -6,6 +6,9 @@ public final class AudioPumpTest {
   ArrayDeque<Runnable> tasks=new ArrayDeque<>(); long now; int creates; Runnable onCreate; final List<Timer> timers=new ArrayList<>();
   Output output=new Output(); AudioPump pump=new AudioPump(tasks::add,this::after,()->now,()->{creates++;if(onCreate!=null)onCreate.run();return output;});
   Fixture(){}
+  Fixture(java.util.function.LongUnaryOperator clock){
+   pump=new AudioPump(tasks::add,this::after,()->now=clock.applyAsLong(now),()->{creates++;if(onCreate!=null)onCreate.run();return output;});
+  }
   Fixture(int frames){
    pump=new AudioPump(tasks::add,this::after,()->now,()->{creates++;return output;},frames);
   }
@@ -420,10 +423,603 @@ public final class AudioPumpTest {
   check(invalidatedStart.pump.accepting()&&invalidatedStart.output.stops==1&&invalidatedStart.output.writes.isEmpty(),"replay invalidation during start retires obsolete output");
   invalidatedStart.output.focus.changed(false);invalidatedStart.run();check(invalidatedStart.pump.accepting(),"invalidated request callbacks stay obsolete");
  }
+ /** Sample-carrying threshold sink, exercised at each virtual millisecond. */
+ static final class QuietRun {
+  final Fixture f=new Fixture();final List<Short> oracle=new ArrayList<>(),played=new ArrayList<>();
+  double firstTone=Double.NaN;long completed;boolean framed=true;long tailPending,tailHeld,headAdjustment;int partition=768,toneStart=2400,end=4000;Runnable afterWrite;
+  final ThresholdOutput out=new ThresholdOutput(f,6000,2880){
+   @Override void advance(){long before=consumed;super.advance();
+    for(long i=before;i<consumed;i++){short value=accepted.get((int)i);played.add(value);
+     if(value!=0&&Double.isNaN(firstTone))firstTone=f.now-(consumed-i)/48.0;}}
+   @Override public long queuedFrames(){long q=super.queuedFrames();return q<0?q:q+headAdjustment;}
+   @Override public int write(short[] samples,int from,int length){int n=super.write(samples,from,length);
+    if(afterWrite!=null){Runnable action=afterWrite;afterWrite=null;action.run();}return n;}
+  };
+  QuietRun(){f.output=out;f.pump.configure(true);}
+  void offer(int from,int to,boolean shortQuiet){short[] pcm=new short[(to-from)*48];
+   for(int i=0;i<pcm.length;i++){int ms=from+i/48;
+    pcm[i]=(short)((ms>=toneStart&&ms<toneStart+800||shortQuiet)&&ms%80<32?1+ms/80:0);oracle.add(pcm[i]);}
+   // These fixture requests are integral milliseconds; progress comes from the request script.
+   for(int off=0;off<pcm.length;off+=partition){
+    int end=Math.min(pcm.length,off+partition);short[] part=Arrays.copyOfRange(pcm,off,end);
+    long seq;
+    if(framed){completed+=(end-off)/48;seq=f.pump.offerCompletedAdvance(f.pump.token(),completed,part);}
+    else seq=f.pump.offer(f.pump.token(),part);
+    check(seq>0,"quiet fixture offer");}}
+  void run(boolean pause,boolean burst,boolean shortQuiet,boolean ambiguous){
+   out.quantum=ambiguous?960:1;
+   for(int at=1;at<=end;at++){
+    f.now=at;out.advance();
+    if(at%16==0&&!(burst&&at>1008&&at<1168)){
+     if(burst&&at==1168){offer(1008,1108,shortQuiet);offer(1108,1168,shortQuiet);}
+     else offer(at-16,at,shortQuiet);}
+    if(!(pause&&at>1008&&at<1168))f.until(at);
+    if((pause||burst)&&at<2100)check(f.pump.latency().summary().trimmedFrames==0,"no recovery before a full post-stall played quiet interval at "+at);
+    if(at==end-1){tailPending=f.pump.latency().summary().pendingFrames;tailHeld=out.held;}
+   }
+   f.until(end+500);out.advance();conserved(f.pump.latency().summary(),"quiet stream");
+   check(out.maxHeld<=2880,"quiet repair retains normal ceiling");
+   check(out.accepted.equals(played),"sink drains every accepted frame exactly");
+   check(oracle.size()-out.accepted.size()==f.pump.latency().summary().trimmedFrames,"all omitted frames honestly trimmed");
+  }
+ }
+ static List<Short> noteSpan(List<Short> pcm){int from=0,to=pcm.size();while(from<to&&pcm.get(from)==0)from++;
+  while(to>from&&pcm.get(to-1)==0)to--;return pcm.subList(from,to);}
+ /** Catches the newest-call guard trimming 144 healthy frames when one delivery is split into 48-frame calls. */
+ static void healthyQuietIsInvariantUnderSameTimePartitions(){
+  QuietRun control=new QuietRun();control.framed=false;control.run(false,false,false,false);
+  for(int part:new int[]{768,384,192,48}){QuietRun r=new QuietRun();r.framed=false;r.partition=part;r.run(false,false,false,false);
+   check(r.oracle.equals(r.out.accepted)&&r.oracle.equals(r.played),"whole healthy quiet waveform exact partition="+part);
+   check(r.firstTone==control.firstTone&&r.tailPending+r.tailHeld==control.tailPending+control.tailHeld,"healthy phase exact partition="+part);
+   check(r.f.pump.latency().summary().trimmedFrames==0,"healthy quiet never compressed partition="+part);}
+ }
+ /** Catches persistent combined debt, including the 12ms residual hidden by checking pending alone. */
+ static void longPlayedQuietRetiresOnlyExcessDebt(){quietRecoveryAcrossPartitions(2400,4000);}
+ static void originalFourSecondQuietRecovers(){quietRecoveryAcrossPartitions(4000,10000);}
+ static void quietRecoveryAcrossPartitions(int toneStart,int end){
+  QuietRun control=new QuietRun();control.toneStart=toneStart;control.end=end;control.run(false,false,false,false);
+  for(int part:new int[]{768,384,192,48})for(boolean burst:new boolean[]{false,true}){
+   QuietRun r=new QuietRun();r.partition=part;r.toneStart=toneStart;r.end=end;r.run(!burst,burst,false,false);
+   check(r.firstTone==control.firstTone,"NO QUIET RECOVERY burst="+burst+" partition="+part+" onset="+r.firstTone+" control="+control.firstTone);
+   check(r.tailPending+r.tailHeld==control.tailPending+control.tailHeld,"combined phase debt retired partition="+part);
+   check(noteSpan(r.oracle).equals(noteSpan(r.out.accepted))&&noteSpan(r.oracle).equals(noteSpan(r.played)),"all notes and short internal gaps exact");
+   AudioPump.Summary s=r.f.pump.latency().summary();check(s.trimmedFrames>0&&s.droppedFrames==0&&s.expiredFrames==0&&s.flushedFrames==0,"only quiet trim accounts for recovery: "+s.line());}
+ }
+ static void shortQuietAndCoarsePlaybackCannotAuthorizeRecovery(){
+  coarsePlayedQuietPhysicalContract();
+  for(boolean shortQuiet:new boolean[]{true}){QuietRun r=new QuietRun();r.run(true,false,shortQuiet,!shortQuiet);
+   check(r.oracle.equals(r.out.accepted)&&r.oracle.equals(r.played),"short quiet or out-of-bound head must preserve entire stream");
+   check(r.f.pump.latency().summary().trimmedFrames==0&&r.tailPending>0,"unsafe recovery withheld");}
+ }
+ static QuietRun warmQuiet(){QuietRun r=new QuietRun();
+  for(int at=1;at<=1600;at++){r.f.now=at;r.out.advance();if(at%16==0)r.offer(at-16,at,false);r.f.until(at);}
+  check(r.f.pump.latency().summary().trimmedFrames==0,"ordinary newest batch survives quiet retries");return r;
+ }
+ /** Catches trimming from fresh generated zeros, partial acceptance or a changed playback epoch. */
+ static void quietRecoveryVetoesUnsafeBoundaries(){
+  for(String mode:new String[]{"pending-tone","written-tone","partial","zero","unknown","backward","route","refill","focus",
+      "write-tone","write-unknown","write-backward","write-route","write-underrun"}){
+   QuietRun r=warmQuiet();Fixture f=r.f;ThresholdOutput o=r.out;short[] old=new short[4800];
+   if(mode.equals("pending-tone"))old[4799]=7;
+   if(mode.equals("written-tone"))old[0]=7;
+   if(mode.equals("partial"))o.maxWrite=100;
+   if(mode.equals("zero"))o.maxWrite=0;
+   if(mode.equals("unknown"))o.unknown=true;
+   if(mode.equals("backward"))r.headAdjustment=960;
+   if(mode.equals("route"))o.route++;
+   if(mode.equals("refill")){o.held=0;o.running=false;o.platformUnderruns++;}
+   if(mode.equals("focus")){o.focus.changed(false);o.focus.changed(true);f.run();}
+   if(mode.startsWith("write-"))r.afterWrite=()->{
+    if(mode.equals("write-tone"))f.pump.offer(f.pump.token(),new short[]{9});
+    if(mode.equals("write-unknown"))o.unknown=true;
+    if(mode.equals("write-backward"))r.headAdjustment=960;
+    if(mode.equals("write-route"))o.route++;
+    if(mode.equals("write-underrun")){o.platformUnderruns++;o.held=0;o.running=false;}
+   };
+   f.now=1616;f.pump.offer(f.pump.token(),old);f.pump.offer(f.pump.token(),new short[768]);f.run();
+   check(f.pump.latency().summary().trimmedFrames==0,"quiet recovery veto "+mode);
+   // A partial or zero write must restart eligibility, even when full writes resume immediately.
+   if(mode.equals("partial")||mode.equals("zero")){o.maxWrite=Integer.MAX_VALUE;f.until(1632);
+    check(f.pump.latency().summary().trimmedFrames==0,"partial/zero acceptance resets quiet evidence "+mode);}
+   conserved(f.pump.latency().summary(),"quiet veto "+mode);
+  }
+ }
+ static QuietRun stalledQuietBeforeRecovery(){QuietRun r=new QuietRun();
+  for(int at=1;at<=2233;at++){r.f.now=at;r.out.advance();if(at%16==0)r.offer(at-16,at,false);
+   if(!(at>1008&&at<1168))r.f.until(at);}
+  check(r.f.pump.latency().summary().pendingFrames>0&&r.f.pump.latency().summary().trimmedFrames==0,"real stall debt awaits eligible retry");return r;
+ }
+ /** Catches unsafe recovery vetoes even when the stream has real positive phase debt. */
+ static void actualDebtStillNeedsStableOutputAndCancellation(){
+  for(String mode:new String[]{"partial","zero","pending-tone","unknown","backward","route","refill",
+      "write-unknown","write-backward","write-route","write-underrun","disable","invalidate","focus"}){
+   QuietRun r=stalledQuietBeforeRecovery();Fixture f=r.f;ThresholdOutput o=r.out;
+   if(mode.equals("partial"))o.maxWrite=100;
+   if(mode.equals("zero"))o.maxWrite=0;
+   if(mode.equals("pending-tone"))f.pump.offer(f.pump.token(),new short[]{7});
+   if(mode.equals("unknown"))o.unknown=true;
+   if(mode.equals("backward"))r.headAdjustment=960;
+   if(mode.equals("route"))o.route++;
+   if(mode.equals("refill")){o.held=0;o.running=false;o.platformUnderruns++;}
+   r.afterWrite=()->{
+    if(mode.equals("write-unknown"))o.unknown=true;
+    if(mode.equals("write-backward"))r.headAdjustment=960;
+    if(mode.equals("write-route"))o.route++;
+    if(mode.equals("write-underrun")){o.platformUnderruns++;o.held=0;o.running=false;}
+    if(mode.equals("disable"))f.pump.configure(false);
+    if(mode.equals("invalidate"))f.pump.invalidate();
+    if(mode.equals("focus"))o.focus.changed(false);
+   };
+   f.until(2234);check(f.pump.latency().summary().trimmedFrames==0,"actual debt veto "+mode);
+   if(mode.equals("partial")||mode.equals("zero")){o.maxWrite=Integer.MAX_VALUE;f.until(2250);
+    check(f.pump.latency().summary().trimmedFrames==0,"actual debt short write resets proof "+mode);}
+   if(mode.equals("disable")||mode.equals("invalidate")||mode.equals("focus")){int n=o.accepted.size();f.until(2500);
+    check(o.accepted.size()==n&&f.live()==0,"actual debt cancellation prevents later writes "+mode);}
+   conserved(f.pump.latency().summary(),"actual debt veto "+mode);
+  }
+ }
+ static void provenQuietRecoveryStillHonorsCancellation(){
+  for(int mode=0;mode<3;mode++){QuietRun r=warmQuiet();Fixture f=r.f;int cancel=mode;
+   r.afterWrite=()->{if(cancel==0)f.pump.configure(false);else if(cancel==1)f.pump.invalidate();else r.out.focus.changed(false);};
+   f.now=1616;f.pump.offer(f.pump.token(),new short[4800]);f.pump.offer(f.pump.token(),new short[768]);f.run();
+   int accepted=r.out.accepted.size();f.until(1900);
+   check(r.out.accepted.size()==accepted&&f.live()==0&&f.pump.latency().summary().trimmedFrames==0,"cancellation vetoes recovery and stale retries "+mode);
+   conserved(f.pump.latency().summary(),"quiet cancel "+mode);}
+ }
+ /** Independent producer: actual offered frames may omit wall time, with native-like 64-frame variation.
+  * Catches recovery using skipped time as debt, losing healthy margin or requiring exact head reads. */
+ static final class ProductionRun {
+  final Fixture f=new Fixture();final List<Short> oracle=new ArrayList<>(),played=new ArrayList<>();
+  int quantum=1,partition=1584,late,ownerGap,executorGap;boolean subMs,jitter;
+  long guest,lastOwner,next=33,tail;double firstTone=Double.NaN,fraction;
+  final ThresholdOutput out=new ThresholdOutput(f,6000,2880){
+   @Override void advance(){long before=consumed;super.advance();
+    for(long i=before;i<consumed;i++){short v=accepted.get((int)i);played.add(v);
+     if(v!=0&&Double.isNaN(firstTone))firstTone=f.now-(consumed-i)/48.0;}}
+   @Override public long queuedFrames(){long q=super.queuedFrames();
+    if(subMs&&running){fraction=(fraction+0.37)%1;return Math.max(0,q-(long)(fraction*48));}return q;}
+  };
+  long frames(long g){return g*48+(jitter&&(g/33)%3==1?64:0);}
+  void run(){f.output=out;out.quantum=quantum;f.pump.configure(true);
+   for(int at=1;at<=6600;at++){f.now=at;out.advance();
+    boolean blocked=ownerGap>0&&at>=991&&at<990+ownerGap||late>0&&at>=3004&&at<3036+late;
+    if(at<=6000&&at>=next&&!blocked){long elapsed=Math.min(100,at-lastOwner);lastOwner=at;
+     long from=frames(guest),to=frames(guest+elapsed);guest+=elapsed;short[] pcm=new short[(int)(to-from)];
+     for(int i=0;i<pcm.length;i++){long ms=(from+i)/48;pcm[i]=(short)(ms>=4000&&ms<4800&&ms%80<32?1+ms/80:0);oracle.add(pcm[i]);}
+     // A completed logical request publishes its literal drain, including cumulative native variation.
+     f.pump.offerCompletedAdvance(f.pump.token(),guest,pcm);
+     next=at+33;}
+    if(!(executorGap>0&&at>=1008&&at<1008+executorGap))f.until(at);
+    if(at==3900)tail=out.held+f.pump.latency().summary().pendingFrames;
+   }
+   conserved(f.pump.latency().summary(),"production gap");check(out.accepted.equals(played),"production sink drained");
+  }
+ }
+ static void skippedProductionPreservesHealthyMargin(){
+  for(int late:new int[]{0,29,31,33}){ProductionRun h=new ProductionRun();h.late=late;h.run();
+   ProductionRun r=new ProductionRun();r.ownerGap=198;r.late=late;r.run();
+   check(r.out.platformUnderruns<=h.out.platformUnderruns+1,"skipped frames cause new post-recovery underrun late="+late);
+   check(r.firstTone-h.firstTone>=98,"skipped source cannot cut healthy margin late="+late+" delta="+(r.firstTone-h.firstTone));
+   check(noteSpan(r.oracle).equals(noteSpan(r.played)),"skipped producer notes/gaps exact");}
+ }
+ static void boundedHeadsRecoverWithoutLosingHealthyPcm(){
+  for(int mode=0;mode<3;mode++)for(boolean jitter:new boolean[]{false,true}){
+   ProductionRun h=new ProductionRun();h.quantum=mode==0?96:mode==1?240:1;h.subMs=mode==2;h.jitter=jitter;h.run();
+   check(h.oracle.equals(h.played)&&h.f.pump.latency().summary().trimmedFrames==0,"whole healthy bounded-head PCM exact");
+   ProductionRun r=new ProductionRun();r.quantum=h.quantum;r.subMs=h.subMs;r.jitter=jitter;r.executorGap=160;r.run();
+   double residual=r.firstTone-h.firstTone;
+   check(residual>=-1.0/48&&residual<=(mode==2?1:r.quantum/48.0)+1.0/48,"bounded-head recovery phase mode="+mode+" jitter="+jitter+" residual="+residual);
+   check(r.out.platformUnderruns<=h.out.platformUnderruns+1,"bounded head new underrun");
+   check(noteSpan(r.oracle).equals(noteSpan(r.played)),"bounded head notes/gaps exact");
+  }
+ }
+ /** No producer proof means exact conservative transport, even after a real playback stall. */
+ static void unknownProducerNeverCompressesQuiet(){
+  for(int partition:new int[]{768,384,192,48}){QuietRun r=new QuietRun();r.framed=false;r.partition=partition;r.run(true,false,false,false);
+   check(r.oracle.equals(r.played)&&r.f.pump.latency().summary().trimmedFrames==0,"raw partition keeps complete waveform "+partition);}
+ }
+ /** Invalid metadata must withhold recovery while preserving every valid array's notes. */
+ static void incompleteProducerCannotAuthorizeRecovery(){
+  for(String mode:new String[]{"null","empty","short","saturated","oversized","nonmonotonic","overflow","raw"}){
+   QuietRun r=warmQuiet();Fixture f=r.f;long endpoint=r.completed+100;
+   short[] pcm=new short[mode.equals("empty")?0:mode.equals("short")?1:mode.equals("saturated")?9600:mode.equals("oversized")?9601:4800];
+   f.now=1700;
+   if(mode.equals("raw"))f.pump.offer(f.pump.token(),pcm);
+   else f.pump.offerCompletedAdvance(f.pump.token(),mode.equals("nonmonotonic")?r.completed:mode.equals("overflow")?Long.MAX_VALUE:endpoint,mode.equals("null")?null:pcm);
+   f.run();f.until(2200);AudioPump.Summary s=f.pump.latency().summary();
+   check(s.trimmedFrames==0,"invalid or missing PCM cannot create quiet debt "+mode);conserved(s,"invalid producer "+mode);
+  }
+ }
+ /** Matched abandonment retires transport; obsolete producer cleanup preserves live focus. */
+ static void producerRetirementMatchesEpoch(){
+  Fixture f=new Fixture();f.pump.configure(true);long old=f.pump.token();
+  f.pump.offerCompletedAdvance(old,16,new short[768]);f.run();AudioPump.Focus focus=f.output.focus;
+  focus.changed(false);f.run();long lost=f.pump.token();
+  f.pump.invalidate(old);f.run();
+  check(f.output.stops==0&&f.pump.token()==lost,"stale cleanup does not replace retained focus");
+  focus.changed(true);f.run();check(f.pump.accepting(),"retained gain accepted");
+  long current=f.pump.token();f.pump.offerCompletedAdvance(current,16,new short[768]);
+  f.pump.invalidate(current);f.run();
+  check(f.output.stops==1&&f.pump.latency().summary().pendingFrames==0,"matching cleanup retires pending transport once");
+  check(f.pump.offerCompletedAdvance(current,32,new short[768])<0,"retired producer cannot publish");
+  long token=f.pump.token();focus.changed(false);f.run();check(f.pump.token()==token,"retired callback cannot change replacement epoch");
+  conserved(f.pump.latency().summary(),"producer retirement");
+ }
+ /** Valid producer debt alone cannot carry a playback bound across grant changes. */
+ static void framedRecoveryRechecksGrant(){
+  QuietRun control=stalledQuietBeforeRecovery();control.f.until(2234);
+  check(control.f.pump.latency().summary().trimmedFrames>0,"unperturbed framed control really recovers on this retry");
+  for(String mode:new String[]{"threshold","capacity","write-threshold","write-capacity"}){
+   QuietRun r=stalledQuietBeforeRecovery();
+   Runnable change=()->{if(mode.endsWith("threshold"))r.out.required+=6;else r.out.capacity+=48;};
+   if(mode.startsWith("write-"))r.afterWrite=change;else change.run();
+   r.f.until(2234);
+   check(r.f.pump.latency().summary().trimmedFrames==0,"grant change vetoes framed recovery "+mode);
+   conserved(r.f.pump.latency().summary(),"changed grant "+mode);
+  }
+ }
+ /** Even a monotone delayed head cannot exclude a hidden restart with an invalid counter. */
+ static void quietProofRequiresCounterContinuity(){
+  for(int count:new int[]{-1,Integer.MAX_VALUE,0}){
+   QuietRun r=stalledQuietBeforeRecovery();
+   check(r.out.platformUnderruns>0,"counter regression begins after a real underrun");
+   r.out.platformUnderruns=count;r.f.until(2234);
+   check(r.f.pump.latency().summary().trimmedFrames==0,"unknown, saturated or reset counter withholds quiet proof: "+count);
+   conserved(r.f.pump.latency().summary(),"counter continuity "+count);
+  }
+ }
+
+ /** Coarse non-leading heads may prove quiet. Physical consumption is the independent oracle. */
+ static void coarsePlayedQuietPhysicalContract(){
+  QuietRun healthy=new QuietRun();long[] control=new long[4501];
+  for(boolean stalled:new boolean[]{false,true}){
+   QuietRun r=stalled?new QuietRun():healthy;r.out.quantum=960;
+   long previousTrim=0,quietFrom=0;int seen=0,under=0;
+   for(int at=1;at<=4500;at++){
+    r.f.now=at;r.out.advance();if(at<=4000&&at%16==0)r.offer(at-16,at,false);
+    if(!(stalled&&at>1008&&at<1168))r.f.until(at);r.out.advance();
+    for(;seen<r.played.size();seen++)if(r.played.get(seen)!=0)quietFrom=seen+1;
+    if(r.out.platformUnderruns!=under){under=r.out.platformUnderruns;quietFrom=r.out.consumed;}
+    AudioPump.Summary x=r.f.pump.latency().summary();
+    if(x.trimmedFrames>previousTrim){check(r.out.consumed-quietFrom>=48000,"coarse physically played quiet");previousTrim=x.trimmedFrames;}
+    if(!stalled)control[at]=r.out.consumed;
+    else check(x.trimmedFrames<=control[at]-r.out.consumed+1,"coarse per-tick physical overtrim");
+    conserved(x,"coarse physical tick");
+   }
+   AudioPump.Summary x=r.f.pump.latency().summary();
+   check(noteSpan(r.oracle).equals(noteSpan(r.played)),"coarse exact notes and internal gaps");
+   check(r.out.accepted.equals(r.played)&&r.oracle.size()-r.played.size()==x.trimmedFrames,"coarse literal conservation");
+   check(x.droppedFrames==0&&x.expiredFrames==0&&x.flushedFrames==0&&r.out.maxHeld<=2880,"coarse no losses or cap change");
+   check(r.firstTone>=healthy.firstTone-1.0/48&&r.out.platformUnderruns<=healthy.out.platformUnderruns+1,"coarse onset and underruns");
+   if(!stalled)check(r.oracle.equals(r.played)&&x.trimmedFrames==0,"coarse whole healthy waveform");
+  }
+ }
+ /** A real backward observation must discard recovery, even at the 48/1-frame boundaries. */
+ static void boundedReadInvalidationEdges(){
+  for(boolean sameTick:new boolean[]{true,false}){
+   QuietRun r=stalledQuietBeforeRecovery();
+   if(sameTick)r.afterWrite=()->{r.headAdjustment=48;};
+   else {
+    // Last observation was at 2224; the next at 2234 consumes 480 frames.
+    r.headAdjustment=481;
+   }
+   r.f.until(2234);
+   check(r.f.pump.latency().summary().trimmedFrames==0,"backward veto sameTick="+sameTick);
+   conserved(r.f.pump.latency().summary(),"bounded backward");
+  }
+ }
+ /** All invalid observations disable optional control, not literal transport. */
+ static void coarseInvalidObservationsPreserveWholeStream(){
+  for(String mode:new String[]{"unknown","saturated","reset","backward","future"}){
+   QuietRun r=new QuietRun();r.out.quantum=960;
+   for(int at=1;at<=4500;at++){
+    r.f.now=at;r.out.advance();if(at<=4000&&at%16==0)r.offer(at-16,at,false);
+    if(at==2200){
+     if(mode.equals("unknown"))r.out.platformUnderruns=-1;
+     if(mode.equals("saturated"))r.out.platformUnderruns=Integer.MAX_VALUE;
+     if(mode.equals("reset"))r.out.platformUnderruns=0;
+     if(mode.equals("backward"))r.headAdjustment=961;
+     if(mode.equals("future"))r.out.unknown=true; // queued=-1 means head=W+1, visibly beyond the endpoint
+    }
+    if(!(at>1008&&at<1168))r.f.until(at);
+    check(r.f.pump.latency().summary().trimmedFrames==0,"coarse invalid veto "+mode);
+   }
+   check(r.oracle.equals(r.out.accepted)&&r.oracle.equals(r.played),"coarse invalid entire waveform "+mode);
+   conserved(r.f.pump.latency().summary(),"coarse invalid "+mode);
+  }
+ }
+ static final class RefillRun {
+  final Fixture f;final ThresholdOutput out;long completed;int attempts;boolean any,started,refuse,throwWrite,repeatCount;int limit=Integer.MAX_VALUE;
+  RefillRun(boolean any){this(any,new Fixture());}
+  RefillRun(boolean any,Fixture fixture){f=fixture;this.any=any;
+   out=new ThresholdOutput(f,6000,2880){
+    @Override public int underrunCount(){return repeatCount?++platformUnderruns:platformUnderruns;}
+    @Override public int write(short[] s,int off,int n){attempts++;if(throwWrite)throw new IllegalStateException("refill failure");
+     maxWrite=refuse?0:limit;int a=super.write(s,off,n);
+     if(a>0&&started&&RefillRun.this.any)running=true;if(running)started=true;return a;}
+   };
+   f.output=out;f.pump.configure(true);
+   for(int at=1;at<=1000;at++){f.now=at;out.advance();if(at%16==0)offer(768,(short)0);f.until(at);}
+   f.until(1100);out.advance();check(!out.running&&out.platformUnderruns>0,"proven real drain");attempts=0;
+  }
+  long offer(int n,short value){short[] pcm=new short[n];Arrays.fill(pcm,value);completed+=n/48;return f.pump.offerCompletedAdvance(f.pump.token(),completed,pcm);}
+  void complete(){AudioPump.Summary x=f.pump.latency().summary();
+   check(x.pendingFrames==0&&x.writtenFrames==x.offeredFrames&&x.expiredFrames==0&&x.droppedFrames==0&&x.flushedFrames==0&&x.trimmedFrames==0,"refill admits all literal PCM: "+x.line());
+   check(f.live()==0,"refill no tail timer");conserved(x,"refill completion");}
+ }
+ static void postDrainToneBypassesCoalescing(){
+  for(boolean any:new boolean[]{false,true}){
+   RefillRun r=new RefillRun(any);r.offer(240,(short)7);r.f.run();
+   check(r.attempts>0&&r.out.accepted.get(r.out.accepted.size()-1)==7,"nonzero prefix attempted immediately");
+   r.f.now=1400;r.f.until(1400);r.complete();
+  }
+ }
+ static void slowProducerNeverLosesAdmission(){
+  for(boolean any:new boolean[]{false,true}){
+   RefillRun r=new RefillRun(any);r.offer(384,(short)7);r.f.run();
+   for(int at=1101;at<=3000;at++){r.f.now=at;r.out.advance();if(at%40==0)r.offer(384,(short)0);r.f.until(at);
+    AudioPump.Summary x=r.f.pump.latency().summary();check(x.expiredFrames==0&&x.pendingFrames<=384,"slow producer makes progress");conserved(x,"slow tick");}
+   r.f.until(3020);r.complete();int tones=0;for(short v:r.out.accepted)if(v==7)tones++;
+   check(tones==384,"all slow producer tone PCM");
+  }
+ }
+ static void inWindowZeroOffersKeepOriginalDeadline(){
+  List<String> late=new ArrayList<>();
+  for(boolean any:new boolean[]{false,true})for(int arrival=0;arrival<=9;arrival++){
+   RefillRun r=new RefillRun(any);int accepted=r.out.accepted.size();r.offer(240,(short)0);r.f.run();
+   check(r.attempts==0,"quiet refill initially coalesces");int first=-1;
+   for(int at=1101;at<=1140&&first<0;at++){
+    r.f.now=at;if(arrival==0&&at<=1109||at==1100+arrival){r.offer(240,(short)0);r.f.run();}
+    r.f.until(at);if(r.attempts>0)first=at;
+   }
+   System.out.println("DEADLINE any="+any+" zeroArrival="+arrival+" firstAttempt="+(first-1100)+"ms");
+   if(first<1100||first>1110)late.add("any="+any+" arrival="+arrival+" first="+first);
+   r.f.until(1140);r.complete();
+   int frames=arrival==0?2400:480;
+   check(r.out.accepted.size()-accepted==frames,"all literal zero PCM accepted once");
+   for(int i=accepted;i<r.out.accepted.size();i++)check(r.out.accepted.get(i)==0,"literal zero PCM unchanged");
+  }
+  check(late.isEmpty(),"in-window offers moved original 10ms deadline: "+late);
+ }
+ /** The clock may reach or pass the hold deadline between the drain and retry reads. */
+ static void retryClockCrossingKeepsDueDeadline(){
+  List<String> late=new ArrayList<>();
+  for(boolean any:new boolean[]{false,true})for(int boundary:new int[]{1110,1111})for(boolean refuse:new boolean[]{false,true}){
+   int[] reads={0};boolean[] armed={false};
+   Fixture f=new Fixture(at->{
+    if(!armed[0])return at;
+    check(++reads[0]<1000,"due retry must not spin");
+    return reads[0]==3?boundary:at;
+   });
+   RefillRun r=new RefillRun(any,f);int accepted=r.out.accepted.size();r.offer(240,(short)0);f.run();
+   check(r.attempts==0,"quiet refill initially paused");
+   f.now=1109;int timersBefore=f.timers.size();r.offer(240,(short)0);r.refuse=refuse;armed[0]=true;f.run();
+   long due=Long.MAX_VALUE;for(Timer t:f.timers)if(!t.cancelled&&!t.fired)due=Math.min(due,t.due);
+   f.until(boundary);
+   System.out.println("CLOCK_BOUNDARY any="+any+" boundary="+boundary+" refuse="+refuse+" firstDue="+due+" attempts="+r.attempts);
+   if(due!=boundary||r.attempts!=(refuse?1:2)){late.add("any="+any+" boundary="+boundary+" refuse="+refuse+" due="+due+" attempts="+r.attempts);continue;}
+   int immediate=0;for(Timer t:f.timers.subList(timersBefore,f.timers.size()))if(!t.cancelled&&t.due<=boundary)immediate++;
+   check(immediate==1,"only one immediate deadline timer");
+   check(f.pump.latency().summary().expiredFrames==0,"deadline settles paused expiry credit");
+   if(refuse){
+    for(int attempt=2;attempt<=26;attempt++){
+     long at=boundary+10L*(attempt-1);f.until(at-1);check(r.attempts==attempt-1,"no early or zero-delay refusal retry");
+     f.until(at);check(r.attempts==attempt,"refused suffix resumes ordinary 10ms retries");
+    }
+    f.until(boundary+270);AudioPump.Summary x=f.pump.latency().summary();
+    check(x.expiredFrames==480&&x.pendingFrames==0&&f.live()==0,"due-boundary refusal expires finitely");
+    check(r.out.accepted.size()==accepted,"refused PCM never accepted");conserved(x,"due-boundary refusal");
+   }else{
+    f.until(boundary+30);r.complete();check(r.out.accepted.size()-accepted==480,"all deadline PCM accepted once");
+    for(int i=accepted;i<r.out.accepted.size();i++)check(r.out.accepted.get(i)==0,"deadline literal PCM unchanged");
+   }
+  }
+  check(late.isEmpty(),"due hold gained another retry interval: "+late);
+ }
+ static void postDeadlineRefusalKeepsTenMsRetry(){
+  for(boolean any:new boolean[]{false,true}){
+   RefillRun r=new RefillRun(any);r.offer(240,(short)0);r.f.run();r.refuse=true;
+   for(int attempt=1;attempt<=26;attempt++){
+    int at=1100+10*attempt;r.f.until(at-1);check(r.attempts==attempt-1,"no early or spinning refusal retry");
+    r.f.until(at);check(r.attempts==attempt,"refused suffix retries every 10ms after gate deadline");
+   }
+   r.f.until(1370);AudioPump.Summary x=r.f.pump.latency().summary();
+   check(x.expiredFrames==240&&x.pendingFrames==0&&r.f.live()==0,"ordinary refusal expires finitely");
+   conserved(x,"post-deadline refusal");
+  }
+ }
+ static void coalescingSleepDoesNotAgeDeferredPcm(){
+  for(int sleep:new int[]{10,310})for(int first:new int[]{0,100,Integer.MAX_VALUE}){
+   RefillRun r=new RefillRun(true);r.offer(240,(short)0);r.f.run();check(r.attempts==0,"quiet prefix coalesces once");
+   r.limit=first;r.f.now=1100+sleep;r.f.until(r.f.now);
+   check(r.attempts==1,"sleep ends coalescing with a real write attempt");
+   check(r.f.pump.latency().summary().expiredFrames==0,"executor sleep does not expire gate-deferred PCM");
+   r.limit=Integer.MAX_VALUE;r.f.until(r.f.now+10);r.complete();
+  }
+ }
+ static void refillRefusalAndCancellationStayFinite(){
+  for(int mode=0;mode<5;mode++){
+   RefillRun r=new RefillRun(true);r.offer(240,(short)0);r.f.run();
+   if(mode<2){r.refuse=true;r.repeatCount=mode==1;r.f.now=1410;r.f.until(2000);
+    AudioPump.Summary x=r.f.pump.latency().summary();check(x.expiredFrames==240&&x.pendingFrames==0&&r.attempts>0&&r.attempts<=27&&r.f.live()==0,"refusal ends without renewing deadline: "+x.line());}
+   else {if(mode==2)r.f.pump.configure(false);else if(mode==3)r.f.pump.invalidate();else r.out.focus.changed(false);
+    r.f.until(2000);check(r.attempts==0&&r.f.live()==0&&r.f.pump.latency().summary().flushedFrames==240,"deferred cancellation");}
+   conserved(r.f.pump.latency().summary(),"refill refusal/cancel");
+  }
+  RefillRun r=new RefillRun(true);r.offer(240,(short)0);r.f.run();r.throwWrite=true;r.f.until(1110);
+  check(r.f.pump.latency().summary().outputFailures==1&&r.f.live()==0,"throw ends deferred chain");conserved(r.f.pump.latency().summary(),"refill throw");
+ }
+
+ /** Copies the frozen SmallLagBoundary/Boundary/Recurrence stimuli into a new normative adapter.
+  * Lost counter-proven references, overtrim, dropped exact-rate PCM or stale proof fail here. */
+ static final class ReferenceRetention {
+ static void check(boolean b,String m){if(!b)throw new AssertionError(m);}
+ static Object field(AudioPump p,String n){try{java.lang.reflect.Field f=AudioPump.class.getDeclaredField(n);f.setAccessible(true);return f.get(p);}catch(Exception e){throw new RuntimeException(e);}}
+ static long number(AudioPump p,String n){return ((Number)field(p,n)).longValue();}
+ static final class Timer {long due;Runnable task;boolean cancelled;Timer(long d,Runnable r){due=d;task=r;}}
+ static long healthyPhase=3072;
+ static final class Run {
+  long now,guest; final String name;final int quantum,initialDelay,stallFrom,stallTo,cadence;final boolean anyRestart,sourceGap;
+  final ArrayDeque<Runnable> tasks=new ArrayDeque<>();final List<Timer> timers=new ArrayList<>();
+  final ArrayList<Short> offered=new ArrayList<>(),accepted=new ArrayList<>(),played=new ArrayList<>();
+  final Sink sink=new Sink();final AudioPump pump;final AudioBackend backend;
+  int minPending=Integer.MAX_VALUE,maxPending,primingTicks,physicalQuietMax;long quietPlayed,trimPrevious,tail,firstNote=-1;String at2500;long phaseBefore=-1,phaseAfter=-1;
+  short[] detached;
+  int lag=256;boolean recurrent;String invalid="";boolean invalidated;long originalAt=-1,originalOffset;
+  final class Guest implements EmulatorSession.Backend,AudioBackend.NativeAudio {
+   public long open(String a,String b){return 1;} public void close(long h){} public int width(long h){return 1;} public int height(long h){return 1;}
+   public void advance(long h,int ms,int[] pixels){detached=new short[ms*48];for(int i=0;i<detached.length;i++){
+     long frame=guest*48+i;long t=frame/48;
+     detached[i]=(short)(t>=4000&&t<4800&&t%80<32?1+t/80:0);offered.add(detached[i]);}guest+=ms;}
+   public void button(long h,int b,boolean d){}public boolean save(long h){return true;}
+   public void enabled(long h,boolean e){} public short[] drain(long h,int n){return detached;}
+  }
+  final class Sink implements AudioPump.Output {
+   long consumed,lastReported;int laggedReads,maxLag,headReads;int held,maxHeld,underruns;boolean running,everStarted;
+   public boolean start(AudioPump.Focus f){return true;}
+   public int startThresholdFrames(){return invalid.equals("threshold")&&now>=1170?2881:2880;}
+   public int writableFrames(){return invalid.equals("grant")&&now>=1170?2887:2886;}
+   public int routeId(){return invalid.equals("route")&&now>=1170?1:0;}
+   public int underrunCount(){return invalid.equals("counter")&&now>=1170?0:underruns;}
+   public long queuedFrames(){long head=consumed/quantum*quantum;
+    if(quantum>1)head=Math.max(lastReported,head);
+    if(name.equals("lag")&&now==1169&&laggedReads==0){head-=lag;laggedReads++;}
+    boolean regress=invalid.equals("backward")&&now>=1170&&!invalidated;
+    if(regress){head=lastReported-1;invalidated=true;}
+    if(!regress)check(head>=lastReported,"raw head monotone");
+    check(head>=0&&head<=consumed,"raw head nonleading");
+    if(quantum==1&&!regress)check(consumed-head<=lag,"raw lag bound");
+    maxLag=Math.max(maxLag,(int)(consumed-head));headReads++;lastReported=head;
+    return accepted.size()-head;}
+   public int write(short[] s,int off,int n){int a=Math.min(n,2886-held);for(int i=0;i<a;i++)accepted.add(s[off+i]);held+=a;maxHeld=Math.max(maxHeld,held);
+    if(!running&&(held>=2880||(everStarted&&anyRestart&&a>0))){running=true;everStarted=true;}return a;}
+   public void suspend(){throw new AssertionError("unexpected suspend");}public void resume(){}public void stop(){}
+   void tick(){if(!running)return;int n=Math.min(48,held);for(int i=0;i<n;i++){
+      short v=accepted.get((int)consumed++);played.add(v);if(v==0)quietPlayed++;else {quietPlayed=0;if(firstNote<0)firstNote=now*48-n+i;}}
+    held-=n;physicalQuietMax=(int)Math.max(physicalQuietMax,quietPlayed);
+    if(n<48){running=false;underruns++;quietPlayed=0;}}
+  }
+  Run(String name,int quantum,int initialDelay,int stallFrom,int stallTo,int cadence,boolean anyRestart,boolean sourceGap){
+   this.name=name;this.quantum=quantum;this.initialDelay=initialDelay;this.stallFrom=stallFrom;this.stallTo=stallTo;this.cadence=cadence;this.anyRestart=anyRestart;this.sourceGap=sourceGap;
+   pump=new AudioPump(tasks::add,(d,r)->{Timer t=new Timer(now+d,r);timers.add(t);return ()->t.cancelled=true;},()->now,()->sink);
+   Guest g=new Guest();backend=new AudioBackend(g,g,()->pump,()->now);pump.configure(true);
+  }
+  void drain(){int work=0;for(;;){boolean ran=false;for(Timer t:new ArrayList<>(timers))if(!t.cancelled&&t.due<=now){t.cancelled=true;t.task.run();ran=true;}
+    while(!tasks.isEmpty()){check(++work<1000,"no spin");tasks.remove().run();ran=true;}if(!ran)break;}timers.removeIf(t->t.cancelled);}
+  void call(int ms)throws Exception{backend.advance(1,ms,new int[1]);}
+  void run()throws Exception{
+   long lastOwner=0,next=initialDelay>0?initialDelay:cadence;
+   for(now=1;now<=6800;now++){
+    sink.tick();boolean block=now>=stallFrom&&now<stallTo||recurrent&&now>=3009&&now<3169;
+    if(now<=6000&&now>=next&&!(sourceGap&&block)){
+     long elapsed=sourceGap?cadence:now-lastOwner;lastOwner=now;
+     while(elapsed>0){int n=(int)Math.min(100,elapsed);call(n);elapsed-=n;}
+     next=now+cadence;
+    }
+    if(now==1169){originalAt=number(pump,"phaseAt");originalOffset=number(pump,"phaseOffset");}
+    if(sourceGap||!block)drain();
+    if(now==1169&&stallTo==1169){
+     check(originalAt==64&&originalOffset==3072,"original independent phase");
+     check(number(pump,"phaseAt")==originalAt&&number(pump,"phaseOffset")==originalOffset,
+       "D1 original reference retained through lag="+lag+" quantum="+quantum+" phaseAt="+number(pump,"phaseAt"));
+     check((Boolean)field(pump,"playbackBound"),"counter-proven refill bound retained");
+     if(name.equals("lag")&&lag>240)check(pump.latency().summary().unknownOccupancyWrites>0,"lag occupancy stays unknown");
+    }
+    if(now==1200&&!invalid.isEmpty()){
+     check(number(pump,"phaseAt")!=originalAt,"old phase cleared after "+invalid);
+     check(!(Boolean)field(pump,"playbackBound")&&number(pump,"refillHead")==-1,"old refill proof cleared after "+invalid);
+    }
+    AudioPump.Summary s=pump.latency().summary();
+    check(s.offeredFrames==s.writtenFrames+s.pendingFrames+s.inflightFrames+s.flushedFrames+s.trimmedFrames+s.droppedFrames+s.expiredFrames,"conservation "+name);
+    check(s.pendingFrames<=9600&&sink.maxHeld<=2886&&s.maxQueuedFrames<=(invalid.equals("threshold")?2881:2880),"caps scenario="+name+" invalid="+invalid+" at="+now+" s.maxQueuedFrames="+s.maxQueuedFrames+" required="+sink.startThresholdFrames()+" maxHeld="+sink.maxHeld+" pending="+s.pendingFrames+" expected="+Math.max(2880,sink.startThresholdFrames()));
+    check(s.expiredFrames==0&&s.droppedFrames==0&&s.flushedFrames==0,"no expiry/drop/flush");
+    if(s.trimmedFrames>trimPrevious){check(quietPlayed>=48000,"actual played quiet before trim "+name+" "+quietPlayed);check(s.trimmedFrames<=now*48-sink.consumed-healthyPhase,"zero overtrim vs independent physical extra phase");
+     System.out.println("TRIM "+name+" t="+now+" total="+s.trimmedFrames+" physicalQuiet="+quietPlayed+" trueExtraPhase="+(now*48-sink.consumed-healthyPhase));trimPrevious=s.trimmedFrames;}
+    if(now>=2000&&now<3900){minPending=Math.min(minPending,(int)s.pendingFrames);maxPending=Math.max(maxPending,(int)s.pendingFrames);if((Boolean)field(pump,"priming"))primingTicks++;}
+    if(now==1000)phaseBefore=number(pump,"phaseOffset");
+    if(now==1300)phaseAfter=number(pump,"phaseOffset");
+    if(now==2500)at2500="priming="+field(pump,"priming")+" phaseAt="+field(pump,"phaseAt")+" phaseOffset="+field(pump,"phaseOffset")+" bound="+field(pump,"playbackBound")+" lower="+field(pump,"playbackOffsetLower")+" quietFrom="+field(pump,"quietFrom")+" quietHead="+field(pump,"quietHead")+" missing="+field(pump,"missingPcm")+" producerValid="+field(pump,"producerValid");
+    if(now==3900)tail=s.pendingFrames+sink.held;
+   }
+   AudioPump.Summary s=pump.latency().summary();
+   check(physicalQuietMax>=48000,"physical quiet >=48000");
+   check(s.offeredFrames==288000&&guest==6000,"exact source rate");
+   check(sink.laggedReads==(name.equals("lag")?1:0),"one lagged read only");
+   check(accepted.equals(played),"accepted FIFO drains");
+   check(s.offeredFrames==offered.size()&&s.writtenFrames==accepted.size(),"literal counts");
+   check(noteSpan(offered).equals(noteSpan(played)),"notes and internal gaps exact "+name);
+   if(s.trimmedFrames==0&&s.droppedFrames==0&&s.expiredFrames==0)check(offered.equals(played),"entire waveform exact");
+   System.out.println(name+" maxLag="+sink.maxLag+" laggedReads="+sink.laggedReads+" headReads="+sink.headReads+" cadence="+cadence+" anyRestart="+anyRestart+" pendingRange="+minPending+":"+maxPending+" primingTicks="+primingTicks+" tail="+tail+" firstNoteFrame="+firstNote+" platform="+sink.underruns+" actualQuietMax="+physicalQuietMax+" phaseBefore="+phaseBefore+" phaseAfter="+phaseAfter+" STATE2500 "+at2500+" SUMMARY "+s.line());
+  }
+ }
+ static List<Short> noteSpan(List<Short> a){int i=0,j=a.size();while(i<j&&a.get(i)==0)i++;while(j>i&&a.get(j-1)==0)j--;return a.subList(i,j);}
+
+  static Run execute(String name,int lag,int quantum,boolean stalled,boolean recurrent,String invalid){
+   Run r=new Run(name,quantum,0,stalled?1009:0,stalled?1169:0,16,true,false);
+   r.lag=lag;r.recurrent=recurrent;r.invalid=invalid;
+   try{r.run();}catch(Exception e){throw new RuntimeException(e);}return r;
+  }
+  static void recovery(){
+   Run h=execute("healthy",0,1,false,false,"");
+   Run c=execute("precision",0,1,true,false,"");
+   check(h.pump.latency().summary().trimmedFrames==0&&h.offered.equals(h.played),"healthy literal waveform");
+   check(c.pump.latency().summary().trimmedFrames==4848&&c.firstNote==h.firstNote,"frozen precision stimulus");
+   for(int lag:new int[]{241,256,321,1536}){
+    Run r=execute("lag",lag,1,true,false,"");
+    check(r.offered.equals(c.offered),"same exact producer");
+    check(r.pump.latency().summary().trimmedFrames==c.pump.latency().summary().trimmedFrames,
+      "retained reference uses unchanged trim law lag="+lag);
+    check(r.played.equals(c.played)&&r.firstNote==c.firstNote,"notes and waveform match precision control");
+   }
+   Run coarse=execute("coarse",1536,1536,true,false,"");
+   check(coarse.pump.latency().summary().trimmedFrames>0&&coarse.firstNote>=h.firstNote,"coarse debt recovers without advancing healthy notes");
+  }
+  static void recurrence(){
+   Run r=execute("recurrence",1536,1536,true,true,"");
+   check(r.pump.latency().summary().droppedFrames==0,"exact 48k recurrence drops zero");
+  }
+  static void invalidations(){
+   for(String mode:new String[]{"route","threshold","grant","counter","backward"}){
+    Run r=execute("lag",256,1,true,false,mode);
+    check(r.pump.latency().summary().trimmedFrames==0,"no stale recovery after "+mode);
+    check(r.offered.equals(r.played),"invalidated proof preserves literal PCM "+mode);
+    System.out.println("PASS reference-negative mode="+mode+" afterLag="+r.lag);
+   }
+  }
+  static void compatibility(){
+   execute("healthy",0,1,false,false,"");
+   for(int lag:new int[]{0,1,48,239,240})execute("lag",lag,1,true,false,"");
+  }
+ }
+
  public static void main(String[] args){
+  if(args.length>0&&args[0].equals("reference-compatibility")){ReferenceRetention.compatibility();return;}
   characteriseCurrentQueue();
   List<String> failed=new ArrayList<>();
   Map<String,Runnable> tests=new LinkedHashMap<>();
+  tests.put("boundedReadInvalidationEdges",AudioPumpTest::boundedReadInvalidationEdges);
+  tests.put("coarseInvalidObservationsPreserveWholeStream",AudioPumpTest::coarseInvalidObservationsPreserveWholeStream);
+  tests.put("postDrainToneBypassesCoalescing",AudioPumpTest::postDrainToneBypassesCoalescing);
+  tests.put("slowProducerNeverLosesAdmission",AudioPumpTest::slowProducerNeverLosesAdmission);
+  tests.put("inWindowZeroOffersKeepOriginalDeadline",AudioPumpTest::inWindowZeroOffersKeepOriginalDeadline);
+  tests.put("retryClockCrossingKeepsDueDeadline",AudioPumpTest::retryClockCrossingKeepsDueDeadline);
+  tests.put("postDeadlineRefusalKeepsTenMsRetry",AudioPumpTest::postDeadlineRefusalKeepsTenMsRetry);
+  tests.put("coalescingSleepDoesNotAgeDeferredPcm",AudioPumpTest::coalescingSleepDoesNotAgeDeferredPcm);
+  tests.put("refillRefusalAndCancellationStayFinite",AudioPumpTest::refillRefusalAndCancellationStayFinite);
+  tests.put("producerRetirementMatchesEpoch",AudioPumpTest::producerRetirementMatchesEpoch);
+  tests.put("framedRecoveryRechecksGrant",AudioPumpTest::framedRecoveryRechecksGrant);
+  tests.put("quietProofRequiresCounterContinuity",AudioPumpTest::quietProofRequiresCounterContinuity);
+  tests.put("unknownProducerNeverCompressesQuiet",AudioPumpTest::unknownProducerNeverCompressesQuiet);
+  tests.put("incompleteProducerCannotAuthorizeRecovery",AudioPumpTest::incompleteProducerCannotAuthorizeRecovery);
+  tests.put("skippedProductionPreservesHealthyMargin",AudioPumpTest::skippedProductionPreservesHealthyMargin);
+  tests.put("boundedHeadsRecoverWithoutLosingHealthyPcm",AudioPumpTest::boundedHeadsRecoverWithoutLosingHealthyPcm);
+  tests.put("healthyQuietIsInvariantUnderSameTimePartitions",AudioPumpTest::healthyQuietIsInvariantUnderSameTimePartitions);
+  tests.put("longPlayedQuietRetiresOnlyExcessDebt",AudioPumpTest::longPlayedQuietRetiresOnlyExcessDebt);
+  tests.put("originalFourSecondQuietRecovers",AudioPumpTest::originalFourSecondQuietRecovers);
+  tests.put("shortQuietAndCoarsePlaybackCannotAuthorizeRecovery",AudioPumpTest::shortQuietAndCoarsePlaybackCannotAuthorizeRecovery);
+  tests.put("quietRecoveryVetoesUnsafeBoundaries",AudioPumpTest::quietRecoveryVetoesUnsafeBoundaries);
+  tests.put("actualDebtStillNeedsStableOutputAndCancellation",AudioPumpTest::actualDebtStillNeedsStableOutputAndCancellation);
+  tests.put("provenQuietRecoveryStillHonorsCancellation",AudioPumpTest::provenQuietRecoveryStillHonorsCancellation);
   tests.put("injectedTargetsBoundPartialZeroAndStartup",AudioPumpTest::injectedTargetsBoundPartialZeroAndStartup);
   tests.put("injectedTargetsKeepPendingCapAgeAndCancellation",AudioPumpTest::injectedTargetsKeepPendingCapAgeAndCancellation);
   tests.put("invalidNormalTargetsRejected",AudioPumpTest::invalidNormalTargetsRejected);
@@ -450,6 +1046,9 @@ public final class AudioPumpTest {
   tests.put("ambiguousOnsetsNotCorrelated",AudioPumpTest::ambiguousOnsetsNotCorrelated);
   tests.put("pendingOnsetKeepsItsOwnAdmission",AudioPumpTest::pendingOnsetKeepsItsOwnAdmission);
   tests.put("coalescedFocusLossFlushesWrittenAudio",AudioPumpTest::coalescedFocusLossFlushesWrittenAudio);
+  tests.put("counterProvenReferencesSurviveLag",ReferenceRetention::recovery);
+  tests.put("exactRateRecurrenceDropsNothing",ReferenceRetention::recurrence);
+  tests.put("retainedReferencesRejectDiscontinuity",ReferenceRetention::invalidations);
   for(Map.Entry<String,Runnable> t:tests.entrySet()){
    try{t.getValue().run();System.out.println("PASS "+t.getKey());}
    catch(RuntimeException|AssertionError e){failed.add(t.getKey());System.out.println("FAIL "+t.getKey()+": "+e);}

@@ -88,5 +88,52 @@ class PrivateInputsContract(unittest.TestCase):
         self.validate([('classes.dex', b'synthetic dex'), ('AndroidManifest.xml', b'synthetic manifest')])
 
 
+class AudioQaDexExclusionContract(unittest.TestCase):
+    # Literal descriptors model string-table bytes; these are synthetic ZIPs,
+    # not compiled APKs. Common production observer seams remain allowed.
+    clean = b'Lio/github/projectcetacean/tamaemu/AudioPump;' + b'Lio/github/projectcetacean/tamaemu/AudioPump$Observer;'
+    probe = b''.join(('Lio/github/projectcetacean/tamaemu/TileTransportProbe' + s + ';').encode()
+                     for s in ['Activity', 'Job', 'Receiver', 'Service', 'State'])
+    variants = [('production-debug', 'io.github.projectcetacean.tamaemu', False),
+                ('production-release', 'io.github.projectcetacean.tamaemu', False),
+                ('transport-debug', 'io.github.projectcetacean.tamaemu.qoltest', True)]
+
+    def validate(self, primary, secondary, package, audioqa, probe):
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, 'w') as archive:
+            archive.writestr('classes.dex', primary)
+            archive.writestr('classes2.dex', secondary)
+        data.seek(0)
+        with zipfile.ZipFile(data) as archive:
+            module.validate_probe_classes(archive, package, probe)
+            module.validate_audioqa_classes(archive, package, audioqa)
+
+    def test_healthy_production_and_transport_descriptors_are_accepted(self):
+        for variant, package, probe in self.variants:
+            with self.subTest(variant=variant):
+                self.validate(self.clean + (self.probe if probe else b''), b'', package, False, probe)
+
+    def test_passive_outer_or_nested_only_leak_in_second_dex_is_rejected(self):
+        for suffix in ['PassiveScalars', 'PassiveScalars$Observer', 'PassiveScalars$1']:
+            leak = ('Lio/github/projectcetacean/tamaemu/AudioQaInput' + suffix + ';').encode()
+            for variant, package, probe in self.variants:
+                with self.subTest(suffix=suffix, variant=variant):
+                    primary = self.clean + (self.probe if probe else b'')
+                    self.assertNotIn(b'AudioQaInput', primary)
+                    if '$' in suffix:
+                        self.assertNotIn(b'AudioQaInputPassiveScalars;', leak)
+                    with self.assertRaisesRegex(AssertionError, 'audioqa'):
+                        self.validate(primary, leak, package, False, probe)
+
+    def test_regular_qa_accepts_all_five_classes_across_dex_and_excludes_transport(self):
+        primary = self.clean + b''.join(('Lio/github/projectcetacean/tamaemu/AudioQaInput' + s + ';').encode()
+                                      for s in ['Provider', 'Receiver', 'Driver', 'TrackProbe'])
+        secondary = (b'Lio/github/projectcetacean/tamaemu/AudioQaInputPassiveScalars;'
+                     b'Lio/github/projectcetacean/tamaemu/AudioQaInputPassiveScalars$Observer;')
+        self.validate(primary, secondary, module.QA_PACKAGE, True, False)
+        with self.assertRaisesRegex(AssertionError, 'probe'):
+            self.validate(primary, secondary + self.probe, module.QA_PACKAGE, True, False)
+
+
 if __name__ == '__main__':
     unittest.main()

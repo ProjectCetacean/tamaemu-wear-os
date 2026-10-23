@@ -35,6 +35,7 @@ final class LifeRecord {
 
 /** Pure checked accounting. Execution budgets never cap this ledger. */
 final class LifeLedger {
+    static final int MAX_REPLAY_MILLIS = 60_000;
     private LifeLedger() {}
     static LifeRecord initialize(ClockSample s) {
         return LifeRecord.from(new long[]{1,s.wallMs,s.elapsedMs,s.bootCount,0,0,1,0});
@@ -62,6 +63,12 @@ final class LifeLedger {
         if (ms < 0 || ms > 100 || ms > r.debtMs) throw new IllegalArgumentException("Invalid life quantum");
         long[] a=r.toArray(); a[4]-=ms; return LifeRecord.from(a);
     }
+    /** Separate checked replay accounting leaves literal consume(0..100) unchanged. */
+    static LifeRecord consumeReplay(LifeRecord r,int completed,int requested) {
+        if(requested<=0||requested>MAX_REPLAY_MILLIS||requested>r.debtMs
+                ||completed<=0||completed>requested)throw new IllegalArgumentException("Invalid replay consumption");
+        long[] a=r.toArray();a[4]=Math.subtractExact(r.debtMs,completed);return LifeRecord.from(a);
+    }
     static LifeRecord nextGeneration(LifeRecord r) {
         long[] a=r.toArray(); a[6]=Math.addExact(r.generation,1); return LifeRecord.from(a);
     }
@@ -76,9 +83,13 @@ final class LifeStatus {
     final LifeRecord record;
     final OwnerState state;
     final long mode,debtMs,clockQuality,committedGeneration,lastSuccessfulCommitUtcMs;
-    final boolean saving, schedulingFailed;
+    final boolean saving, schedulingFailed, inputContinuity;
     final String schedulerStatus;
     LifeStatus(LifeRecord working,LifeRecord committed,OwnerState state,long savedUtc,String scheduler,boolean schedulingFailed) {
+        this(working,committed,state,savedUtc,scheduler,schedulingFailed,false);
+    }
+    LifeStatus(LifeRecord working,LifeRecord committed,OwnerState state,long savedUtc,String scheduler,boolean schedulingFailed,boolean inputContinuity) {
+        this.inputContinuity=state==OwnerState.SAVING&&inputContinuity;
         record=working;this.state=state;mode=committed==null?0:committed.mode;
         debtMs=working==null?0:working.debtMs;clockQuality=working==null?0:working.clockQuality;
         committedGeneration=committed==null?0:committed.generation;lastSuccessfulCommitUtcMs=savedUtc;

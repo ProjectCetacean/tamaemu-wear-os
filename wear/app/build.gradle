@@ -27,8 +27,8 @@ android {
                                 wearQaAudioQueueMs: wearQaAudioQueueMs]
         minSdk 26
         targetSdk 36
-        versionCode 10
-        versionName '0.2.0-wear.10'
+        versionCode 13
+        versionName '0.2.0-wear.13'
         ndk { abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64' }
         externalNativeBuild {
             cmake { arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON' }

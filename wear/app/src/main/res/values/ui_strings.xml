@@ -43,6 +43,7 @@
     <string name="ui_lcd_glass">LCD Glass</string>
     <string name="ui_reset">Reset appearance</string>
     <string name="ui_gestures">Tap display for controls. Hold for settings.</string>
+    <string name="ui_hold_for_settings">Hold for settings.</string>
     <string name="ui_control_space">Control space: %1$s</string>
     <string name="ui_own_space">Own space</string>
     <string name="ui_over_display">Over display</string>
@@ -57,6 +58,8 @@
     <string name="ui_overlay_explanation">Over display keeps the LCD size fixed when controls are shown or hidden.</string>
     <string name="ui_show_controls">Show controls</string>
     <string name="ui_hide_controls">Hide controls</string>
+    <string name="ui_controls_shown">Controls shown</string>
+    <string name="ui_controls_hidden">Controls hidden</string>
     <string name="ui_geometry_failure">This viewport cannot fit the display and three 48 dp controls.</string>
     <string name="ui_sound">Sound: %1$s</string>
 </resources>

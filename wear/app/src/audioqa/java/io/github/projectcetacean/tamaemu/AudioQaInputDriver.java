@@ -18,6 +18,8 @@ import java.util.Set;
 
 /** Finite process-owned contacts in the current QA decor. No global input injection. */
 final class AudioQaInputDriver {
+    final AudioQaInputPassiveScalars passive = new AudioQaInputPassiveScalars();
+    final AudioQaInputTrackProbe probe = new AudioQaInputTrackProbe();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Set<String> used = new HashSet<>();
     private WeakReference<MainActivity> resumed = new WeakReference<>(null);
@@ -36,22 +38,28 @@ final class AudioQaInputDriver {
     private float x, y;
 
     void resume(MainActivity activity) {
-        if (resumed.get() != activity) abort("owner_changed");
+        if (resumed.get() != activity) { abort("owner_changed"); probe.cancel(); }
         resumed = new WeakReference<>(activity);
     }
     void depart(Activity activity, String reason) {
         if (resumed.get() == activity) {
-            abort(reason);
+            abort(reason); probe.cancel();
             resumed.clear();
         }
     }
     void command(String action) {
         // BroadcastReceiver and lifecycle callbacks are main-thread callbacks. No queued command can revive a run.
         if (Looper.myLooper() != Looper.getMainLooper()) return;
-        if ("stop".equals(action)) { abort("explicit_stop"); return; }
+        if ("passive-scalars".equals(action)) { passive.begin(); return; }
+        if ("passive-stop".equals(action)) { passive.stop("explicit_stop"); return; }
+        if ("stop".equals(action)) { abort("explicit_stop"); probe.cancel(); return; }
+        if ("track-contract".equals(action)) {
+            if (root!=null || !probe.begin(resumed.get())) declined(action);
+            return;
+        }
         if (!("singles".equals(action) || "same-c".equals(action) || "abc".equals(action))) return;
         MainActivity activity = resumed.get();
-        if (root != null || used.contains(action) || totalContacts >= 16 || activity == null
+        if (probe.busy() || root != null || used.contains(action) || totalContacts >= 16 || activity == null
                 || !AudioQaInputProvider.enabled(activity) || !activity.hasWindowFocus()) { declined(action); return; }
         View decor = activity.getWindow().getDecorView();
         if (!decor.isAttachedToWindow() || !allControls(decor, activity)) { declined(action); return; }
