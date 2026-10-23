@@ -1,6 +1,14 @@
 # Release notes
 
-## 0.2.0-wear.12, unreleased candidate
+## 0.2.0-wear.13, unreleased candidate
+
+- Version code 13. Silent replay batches literal CPU steps up to the original timing and event boundaries. Audible execution retains its per-instruction audio observation.
+- Persistent trace bookkeeping now uses defined unsigned wrap. Version-4 save bytes and the desktop state layout retain their existing representation.
+- New native regressions check batching, counter wrap, diagnostic output and older save fixtures.
+
+Source review and host checks cover these changes. Host timing does not establish watch reopen time, speaker latency or Tile behavior. See [verification](VERIFICATION.md) for results and remaining checks.
+
+## 0.2.0-wear.12, historical candidate snapshot
 
 - Version code 12. Guarded exact hard-HALT batching skips unchanged native ticks only when eligible; event boundaries retain the original execution path.
 - Catch-up groups completed work across JNI using the existing steps of at most 100 ms and a nominal 2 ms budget checked between operations. Only reported completed work reduces owed time. One operation and scheduling can delay return; this is no strict physical latency guarantee.
@@ -8,7 +16,7 @@
 - Controls provide result feedback and mode-aware hints. No new assets were needed.
 - Full pull-request host checks now include the permanent exact replay regression alongside the existing native suite.
 
-Host checks cover literal-reference equivalence, completed-work accounting and native save/reopen comparisons. These do not establish a two-second reopen or speaker latency. Combined source review, full hosted Android/CI, APK inspection and watch acceptance remain pending for this candidate. See [verification](VERIFICATION.md) for scope.
+Full hosted CI, APK checks and scoped clock-screen watch results for wear.12 are recorded in [verification](VERIFICATION.md). Those clock samples do not establish normal pet-play speed or speaker latency.
 
 ## 0.2.0-wear.11, historical candidate snapshot
 

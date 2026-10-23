@@ -4,7 +4,7 @@ A Wear OS port of [maragotchi's Tamaemu](https://github.com/maragotchi/tamaemu),
 
 Supported firmware: Tamagotchi iD L. The watch app requires Android API 26 or later and includes ARM32, ARM64 and x86_64 libraries. Other models and the Windows emulator's connection play are not supported by this port.
 
-Candidate `0.2.0-wear.11` (version code 11) is unreleased.
+Candidate `0.2.0-wear.13` (version code 13) is unreleased.
 
 ## Firmware
 
@@ -20,7 +20,7 @@ Settings include display size, integer scaling, LCD effects and sharpness, butto
 
 Saves stay in the app's private storage. **Normal** mode accounts for time away, with the firmware's original care consequences. **Protected** pauses future away time; it does not provide automatic care. Background jobs use a 60-second replay allowance on a 15-minute periodic schedule. Android can delay or stop them, so long gaps can still require catch-up on reopening.
 
-Catch-up batches idle CPU work and timer comparisons. Catch-up progress updates are limited to 10 per second without changing aging or owed time.
+Catch-up batches literal CPU steps and eligible idle intervals while preserving instruction order, event boundaries and owed time. Catch-up progress updates are limited to 10 per second without changing aging or owed time.
 
 Back up the save before updating and use the same signing identity. Do not uninstall or clear app data to work around an update failure.
 

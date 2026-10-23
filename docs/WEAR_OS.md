@@ -1,6 +1,6 @@
 # Tamaemu on Wear OS
 
-Candidate `0.2.0-wear.12` (version code 12) is unreleased. The app uses compatible, user-supplied iD L firmware; see [release notes](RELEASE_NOTES.md) for current changes.
+Candidate `0.2.0-wear.13` (version code 13) is unreleased. The app uses compatible, user-supplied iD L firmware; see [release notes](RELEASE_NOTES.md) for current changes.
 
 ## Controls and settings
 

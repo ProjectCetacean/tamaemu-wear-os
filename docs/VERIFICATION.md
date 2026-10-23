@@ -1,16 +1,24 @@
 # Verification
 
-Candidate `0.2.0-wear.12` (version code 12) is unreleased. Combined source review, final replay-batch review, full hosted Android/CI, inspected APKs and watch acceptance remain pending. Host results do not establish care-ready reopen time, speaker latency or app completion.
+Candidate `0.2.0-wear.13` (version code 13) is unreleased. Source review and host checks cover the literal CPU batch and unsigned trace-counter changes. Android artifacts and watch acceptance must cover the intended candidate. Host results do not establish care-ready reopen time, speaker latency or app completion.
 
 ## Current host evidence
 
-The permanent native regression passed 2,031 checks against a frozen literal reference, covering raw state, save/reopen, continuation and guarded hard-HALT eligibility and event boundaries. It uses synthetic inputs without proprietary firmware. Exact batching is restricted to eligible unchanged ticks; the original execution path handles boundaries and unsupported states.
+[Source `1ab2ade`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/1ab2adeb264675a2fc70985c48d96e5c061c4f83) passed all nine native/JNI CTests. The two new permanent tests cover 324 batch cases and 17,198 counter assertions, including all 256 tick positions, required multi-step progress, diagnostic output and three independently encoded older version-4 save fixtures. The batching test rejects both a no-op helper and a wrong architectural result. Counter size, alignment, save bytes and canonical digest remain compatible.
 
-A separate host comparison using local inputs matched original and candidate guest-state digests over two guest minutes. Candidate headless/rendered and save/reopen comparisons passed at eight hours, one day and three days. The eight-hour headless replay took about 0.246 seconds; the whole paired host check took about 2.567 seconds. Long-interval comparisons here were within the candidate, not against the original: the original long comparison timed out. These are scoped native host measurements, excluding Android owner and watch care-ready acceptance.
+A separate local comparison passed 198,502 cases through frozen literal instruction code with the intentional unsigned-counter header change. It compares the full emulator, NOR and diagnostic output, including all 65,536 instruction words with zero, one and two extension prefixes. This reference defines counter wrap; it does not test the former undefined signed-boundary behavior. The permanent exact idle-replay regression also passed 2,031 checks.
 
-The integrated 19 Java model mains and actual JNI checks passed, including 151 new JNI checks. Replay grouping uses existing steps of at most 100 ms with a nominal 2 ms budget sampled between operations. The fallback completes one existing step; only exact reported completion consumes debt. Unknown failures require recovery from a durable checkpoint. Scheduling and an already-started operation can delay return, so the budget is no strict physical latency guarantee. Normal away aging, owed time, save/retry, clock, input and live-audio contracts remain unchanged.
+On one disposable, newly hatched local guest, eight hours of headless replay took 13.766 seconds with literal stepping and 10.401 seconds with batching, about 24% less time. Both builds used the unsigned counter; CPU batching alone was disabled in the reference. Final guest/NOR/pacing digests agreed, rendered comparisons and save/reopen checks passed, and input files stayed unchanged. These are host measurements, excluding Android ownership, UI and physical-watch delay.
 
-Control feedback and mode-aware guidance have source and host coverage. Android execution, actual TalkBack events, visible watch guidance and retained settings still need checking. No new assets were needed.
+Replay grouping retains existing steps of at most 100 ms and a nominal 2 ms budget checked between operations. Only reported completed work consumes owed time. An in-flight operation and scheduling can delay return; the budget is no strict physical latency guarantee. Normal away aging, care consequences, owed time, save/retry, clock, input and live-audio contracts remain in force.
+
+## Historical wear.12 Android and watch evidence
+
+The completed full pull-request [CI run](https://github.com/ProjectCetacean/tamaemu-wear-os/actions/runs/39841719058) for [source `88439f7`](https://github.com/ProjectCetacean/tamaemu-wear-os/commit/88439f72000fe9a43a5417829c9feb3bd71fe257) passed 323 production and 51 QA Android tests with no failures, errors or skips, plus all six APK checks. Lint had no errors, with 16 production and 17 QA warnings. This run predates the wear.13 native changes.
+
+Both wear.12 watch packages were installed with matching signed artifact bytes, preserved saves and preserved presentation preferences. On the ARM32 watch, eight guest hours completed headlessly in 2.824 seconds with rendered-reference and save/reopen agreement. QA reached an owner-ready marker after roughly 13.2 hours of accounted replay in 7.526 seconds; production reached it after roughly two hours in 3.967 seconds. These samples showed the guest clock screen. An owner marker is neither exact UI readiness nor speaker latency, and clock-screen timings do not establish normal pet-play performance.
+
+Physical production checks confirmed enabled controls when revealed, display hold opening Settings, mode-correct guidance and Back navigation, with presentation choices restored. The Tile displayed a saved LCD image, saved time and full date/year. Footer launch and settled Tile appearance remain unverified. Spoken TalkBack, normal pet-play response, rapid-press sound lag and continuity still need physical acceptance. No new artwork was needed.
 
 ## Historical wear.11 host and CI evidence
 
